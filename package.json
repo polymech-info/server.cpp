@@ -1,0 +1,12 @@
+{
+  "name": "@polymech/pm-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tanit node library. Desktop and phone hosts compile the platform files.",
+  "scripts": {
+    "configure": "node ../../scripts/cmake.mjs --preset dev",
+    "build:cpp": "npm run configure && node ../../scripts/cmake.mjs --build --preset dev --target pm-server",
+    "test": "node tests/run.mjs"
+  }
+}
