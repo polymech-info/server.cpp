@@ -41,6 +41,17 @@ function(pm_server_add_desktop_node target)
   endif()
   _pm_server_root(_root)
   target_sources(${target} PRIVATE "${_root}/src/node-core/routes/node_serve.cpp")
+  # Audio and video routes live next to the agent sources. A viewer has the
+  # node and not the agent, so those two units have to be compiled here or
+  # node serve cannot link.
+  if(NOT FEATURE_COMMAND_LLM)
+    get_target_property(_srcs ${target} SOURCES)
+    if(NOT _srcs MATCHES "node_audio\\.cpp")
+      target_sources(${target} PRIVATE
+        "${_root}/src/node-features/audio/node_audio.cpp"
+        "${_root}/src/node-features/video/node_video.cpp")
+    endif()
+  endif()
 endfunction()
 
 function(pm_server_add_mdns target)
