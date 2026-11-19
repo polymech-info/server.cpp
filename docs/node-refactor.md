@@ -1,7 +1,7 @@
 # Node after the split
 
 **Date:** 2026-11-19  
-**Status:** target in progress. `tanit-cli node serve` listens with lan and vfs, service name `tanit-node`, and does not mount the agent. An unknown `/v1/` path is 404. Loopback with no credential is refused. Pairing admin needs the serve key on the local machine. `POST /v1/lan/phone-vfs` accepts a paired device whose grant has `files`. A ticket offers only scopes whose feature is on. Audio and video still include the agent header. The phone listener keeps its own three checks. The viewer preset still leaves `FEATURE_COMMAND_NODE` off.  
+**Status:** target in progress. `tanit-cli node serve` listens with lan and vfs. The tray seeds a Node row that runs `node serve --lan --pair`, and Places has a Pair a phone entry that starts the same command. The viewer preset still leaves `FEATURE_COMMAND_NODE` off.  
 **Reads with:** [node-today.md](node-today.md) (what compiles now), [node-impl.md](node-impl.md) (the commits).
 
 One listener function, in `node-core`. It is everything a node is with `llm` off. Features register routes on a router the core owns. They do not receive `httplib::Server`, and they do not answer their own auth. Phone TLS is phase 1 and lands before this split.
@@ -40,7 +40,7 @@ packages/encryption.cpp/
 | Today | Lands in |
 |---|---|
 | `base/src/vfs.cpp`, `vfs.hpp`, `vfs_root.hpp` | `node-features/vfs`. Still in `pm-server-lib`, because the phone mounts it |
-| `vfs_bookmarks.cpp` | `node-features/vfs`. Host-compiled. It reads the settings store |
+| shared folders | Parsed bookmark rows, passed in. `shared_folder.hpp` names the mounts. No settings read in the route file |
 | `peer/pair_store.cpp`, `lan/pair_store.hpp` | `node-core/pair` |
 | `peer/listener.cpp` | `node-core/lifecycle`. The phone process. TLS sits in front of it |
 | `base` headers `features.hpp`, `secret.hpp` | `node-core/routes` |
@@ -174,7 +174,7 @@ classDiagram
     core_cpp --> ListenOptions
 ```
 
-`node_features()` is `lan` and `vfs`. Phase 4 adds `audio` and `video` when the binary has capture. `payload_max` is 9 MiB on `node serve`. The agent still passes a 500 MiB ceiling for its own process. `service` is `tanit-node`, or `tanit-llm-agent` when the layer is on. `RoutePolicy.max_body` is the per-route cap. Phase 4 is what makes the vfs cap and the completion cap different routes rather than one process number.
+`node_features()` is `lan` and `vfs`, plus `audio` and `video` when the binary has capture. `payload_max` and `http_workers` are host listener settings. The defaults are 9 MiB and 8 workers. The phone listener hardcodes 9 MiB and 4 workers. The agent process sets 500 MiB and keeps its turn gate on LLM routes. vfs refuses a write over 8 MiB. `RoutePolicy.max_body` is unused. A stream is not a request body. `service` is `tanit-node`, or `tanit-llm-agent` when the layer is on.
 
 `capability` is `files`, `audio`, `video`, `chat`, or `tools`. Empty means any paired peer. `layer.scope` is not a field. `RemotePair` comes from a paired token. `ServeKey` comes from the configured serve credential and its explicit grant. `LocalAdmin` comes from IPC or a local credential. `LocalAgent` is injected only by a direct in-process call and carries explicit capabilities plus consent. Neither local principal is inferred from loopback.
 
@@ -337,7 +337,7 @@ sequenceDiagram
 | Open loopback | Pass when no serve key and no hop | Not a pass. A named dev-open list is the only exception |
 | Phone announce | Serve key only | A pair token with `files` |
 | `/health` service | `tanit-llm-agent` | `tanit-node`, or the agent's name when the layer is on |
-| Body limit | 500 MiB for the process | 9 MiB on `node serve`. `RoutePolicy.max_body` per route in phase 4 |
+| Body limit | 500 MiB for the agent process | 9 MiB on `node serve` and the phone. vfs write stays 8 MiB. No per-route cap |
 | `/v1/logs` | `desktop/node_lan.cpp` | `node-features/agent`. 404 on a plain node |
 | Audio, video, control | `desktop/node_audio.cpp`, `node_video.cpp` | `node-features/audio`, `video`, `control`. Phase 4. Control stays off on the phone |
 | Desktop pair file | Ticket scopes in `lan_win.cpp` | `node-core/pair` in phase 3. `PairStore` rows |

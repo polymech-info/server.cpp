@@ -1,5 +1,7 @@
 #include "lan/pair_store.hpp"
 
+#include "pm/node/sessions.hpp"
+
 #include "commands/batch_queue.hpp"
 #include "string/string_utils.hpp"
 
@@ -13,6 +15,11 @@
 #include <fstream>
 #include <mutex>
 #include <system_error>
+#if defined(_WIN32)
+#    include <io.h>
+#else
+#    include <unistd.h>
+#endif
 
 #if defined(_WIN32)
 #    ifndef NOMINMAX
@@ -144,26 +151,61 @@ nlohmann::json grant_json(const Grant& grant)
         {"vfs", vfs_grant_name(grant.vfs)},
         {"audio", grant.audio},
         {"video", grant.video},
+        {"chat", grant.chat},
+        {"tools", grant.tools},
         {"networks", grant.networks},
     };
 }
 
-Grant grant_from(const nlohmann::json& node)
+bool read_switch(const nlohmann::json& node, const char* key, std::string& out, std::string& err)
 {
-    Grant grant;
-    if (!node.is_object())
-        return grant;
+    out = "off";
+    if (!node.contains(key))
+        return true;
+    if (!node[key].is_string()) {
+        err = "the pair file is not valid";
+        return false;
+    }
+    const std::string value = node[key].get<std::string>();
+    if (value != "on" && value != "off") {
+        err = "the pair file is not valid";
+        return false;
+    }
+    out = value;
+    return true;
+}
+
+bool grant_from(const nlohmann::json& node, Grant& grant, std::string& err)
+{
+    grant = {};
+    if (!node.is_object()) {
+        err = "the pair file is not valid";
+        return false;
+    }
     if (node.contains("revision") && node["revision"].is_number_integer())
         grant.revision = (std::max)(1, node["revision"].get<int>());
-    if (node.contains("vfs") && node["vfs"].is_string())
-        (void)parse_vfs_grant(node["vfs"].get<std::string>(), grant.vfs);
-    if (node.contains("networks") && node["networks"].is_array()) {
-        for (const auto& row : node["networks"]) {
-            if (row.is_string() && cidr_valid(row.get<std::string>()))
-                grant.networks.push_back(row.get<std::string>());
+    if (node.contains("vfs")) {
+        if (!node["vfs"].is_string() ||
+            !parse_vfs_grant(node["vfs"].get<std::string>(), grant.vfs)) {
+            err = "the pair file is not valid";
+            return false;
         }
     }
-    return grant;
+    if (!read_switch(node, "audio", grant.audio, err) ||
+        !read_switch(node, "video", grant.video, err) ||
+        !read_switch(node, "chat", grant.chat, err) ||
+        !read_switch(node, "tools", grant.tools, err))
+        return false;
+    if (node.contains("networks") && node["networks"].is_array()) {
+        for (const auto& row : node["networks"]) {
+            if (!row.is_string() || !cidr_valid(row.get<std::string>())) {
+                err = "the pair file is not valid";
+                return false;
+            }
+            grant.networks.push_back(row.get<std::string>());
+        }
+    }
+    return true;
 }
 
 std::string text_of(const nlohmann::json& row, const char* key)
@@ -171,9 +213,11 @@ std::string text_of(const nlohmann::json& row, const char* key)
     return row.contains(key) && row[key].is_string() ? row[key].get<std::string>() : std::string{};
 }
 
-bool read_rows(const std::filesystem::path& file, std::vector<Peer>& out, std::string& err)
+bool read_doc(const std::filesystem::path& file, std::string& identity, std::vector<Peer>& out,
+              std::string& err)
 {
     out.clear();
+    identity.clear();
     std::error_code ec;
     if (!std::filesystem::exists(file, ec))
         return true;
@@ -187,19 +231,43 @@ bool read_rows(const std::filesystem::path& file, std::vector<Peer>& out, std::s
         err = "the pair file is not valid";
         return false;
     }
+    // The desktop ticket file used `v`. This store uses `version`.
+    if (doc.contains("v") && !doc.contains("version")) {
+        err = "pair file uses ticket scopes";
+        return false;
+    }
+    int version = 0;
+    if (doc.contains("version") && doc["version"].is_number_integer())
+        version = doc["version"].get<int>();
+    if (version != 1 && version != 2) {
+        err = "the pair file is not valid";
+        return false;
+    }
+    if (doc.contains("identity") && doc["identity"].is_string())
+        identity = doc["identity"].get<std::string>();
     for (const auto& row : doc["devices"]) {
-        if (!row.is_object())
-            continue;
+        if (!row.is_object() || (row.contains("scopes") && !row.contains("outbound"))) {
+            err = row.contains("scopes") ? "pair file uses ticket scopes" : "the pair file is not valid";
+            return false;
+        }
         Peer peer;
         peer.id = text_of(row, "id");
-        if (!peer_id_valid(peer.id))
-            continue;
+        if (!peer_id_valid(peer.id)) {
+            err = "the pair file has a device id that is not valid";
+            return false;
+        }
         peer.name = text_of(row, "name");
         peer.peer_fp = text_of(row, "peer_fp");
         peer.tls_fp = text_of(row, "tls_fp");
         peer.token_sha256 = text_of(row, "token_sha256");
+        if (!peer.token_sha256.empty() && peer.token_sha256.size() != 64) {
+            err = "the pair file is not valid";
+            return false;
+        }
         peer.trust = parse_trust(text_of(row, "trust"));
-        peer.outbound = grant_from(row.contains("outbound") ? row["outbound"] : nlohmann::json{});
+        if (!grant_from(row.contains("outbound") ? row["outbound"] : nlohmann::json::object(),
+                        peer.outbound, err))
+            return false;
         peer.created = text_of(row, "created");
         peer.last_seen = text_of(row, "last_seen");
         out.push_back(std::move(peer));
@@ -207,7 +275,8 @@ bool read_rows(const std::filesystem::path& file, std::vector<Peer>& out, std::s
     return true;
 }
 
-bool write_rows(const std::filesystem::path& file, const std::vector<Peer>& rows, std::string& err)
+bool write_doc(const std::filesystem::path& file, std::string_view identity,
+               const std::vector<Peer>& rows, std::string& err)
 {
     nlohmann::json devices = nlohmann::json::array();
     for (const auto& peer : rows) {
@@ -228,34 +297,86 @@ bool write_rows(const std::filesystem::path& file, const std::vector<Peer>& rows
         std::filesystem::create_directories(file.parent_path(), ec);
     std::filesystem::path tmp = file;
     tmp += ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            err = "could not write the pair file";
-            return false;
-        }
-        out << nlohmann::json{{"version", 1}, {"devices", std::move(devices)}}.dump(2);
-        if (!out) {
-            err = "could not write the pair file";
-            return false;
-        }
-    }
-    std::filesystem::rename(tmp, file, ec);
+    std::filesystem::path bak = file;
+    bak += ".bak";
+    const std::string body =
+        nlohmann::json{{"version", 2}, {"identity", std::string(identity)}, {"devices", std::move(devices)}}
+            .dump(2);
 #if defined(_WIN32)
-    // Windows refuses to replace a file that a reader holds open. A listener
-    // reads this file for each request, for a few milliseconds.
-    for (int attempt = 0; ec && attempt < 20; ++attempt) {
-        ::Sleep(10);
-        ec.clear();
-        std::filesystem::rename(tmp, file, ec);
-    }
+    FILE* fp = _wfopen(tmp.c_str(), L"wb");
+#else
+    FILE* fp = std::fopen(tmp.string().c_str(), "wb");
 #endif
+    if (!fp) {
+        err = "could not write the pair file";
+        return false;
+    }
+    const bool wrote = std::fwrite(body.data(), 1, body.size(), fp) == body.size();
+    if (wrote)
+        std::fflush(fp);
+#if defined(_WIN32)
+    if (wrote)
+        _commit(_fileno(fp));
+#else
+    if (wrote)
+        fsync(fileno(fp));
+#endif
+    std::fclose(fp);
+    if (!wrote) {
+        std::filesystem::remove(tmp, ec);
+        err = "could not write the pair file";
+        return false;
+    }
+    if (std::filesystem::exists(file, ec)) {
+#if defined(_WIN32)
+        if (!CopyFileW(file.c_str(), bak.c_str(), FALSE)) {
+            std::filesystem::remove(tmp, ec);
+            err = "could not back up the pair file";
+            return false;
+        }
+#else
+        std::filesystem::copy_file(file, bak, std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            std::filesystem::remove(tmp, ec);
+            err = "could not back up the pair file";
+            return false;
+        }
+#endif
+    }
+#if defined(_WIN32)
+    // Replace a file a listener may still have open.
+    bool replaced = false;
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        if (MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            replaced = true;
+            break;
+        }
+        ::Sleep(10);
+    }
+    if (!replaced) {
+        std::filesystem::remove(tmp, ec);
+        err = "could not replace the pair file";
+        return false;
+    }
+#else
+    std::filesystem::rename(tmp, file, ec);
     if (ec) {
         std::filesystem::remove(tmp, ec);
         err = "could not replace the pair file";
         return false;
     }
+#endif
     return true;
+}
+
+void clear_caps(Grant& grant)
+{
+    grant.vfs = VfsGrant::Off;
+    grant.audio = "off";
+    grant.video = "off";
+    grant.chat = "off";
+    grant.tools = "off";
+    grant.networks.clear();
 }
 
 Peer* row_of(std::vector<Peer>& rows, std::string_view id)
@@ -349,11 +470,59 @@ bool peer_id_valid(std::string_view id) noexcept
     if (id.empty() || id.size() > 64)
         return false;
     for (unsigned char c : id) {
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                        c == '.' || c == '_' || c == '-' || c == ':';
         if (!ok)
             return false;
     }
     return true;
+}
+
+bool grant_scope_known(std::string_view scope) noexcept
+{
+    return scope == "files" || scope == "audio" || scope == "video" || scope == "chat" ||
+           scope == "tools";
+}
+
+bool grant_set_scope(Grant& grant, std::string_view scope)
+{
+    if (scope == "files") {
+        grant.vfs = VfsGrant::Write;
+        return true;
+    }
+    if (scope == "audio") {
+        grant.audio = "on";
+        return true;
+    }
+    if (scope == "video") {
+        grant.video = "on";
+        return true;
+    }
+    if (scope == "chat") {
+        grant.chat = "on";
+        return true;
+    }
+    if (scope == "tools") {
+        grant.tools = "on";
+        return true;
+    }
+    return false;
+}
+
+std::vector<std::string> grant_scopes(const Grant& grant)
+{
+    std::vector<std::string> scopes;
+    if (grant.vfs != VfsGrant::Off)
+        scopes.emplace_back("files");
+    if (grant.audio == "on")
+        scopes.emplace_back("audio");
+    if (grant.video == "on")
+        scopes.emplace_back("video");
+    if (grant.chat == "on")
+        scopes.emplace_back("chat");
+    if (grant.tools == "on")
+        scopes.emplace_back("tools");
+    return scopes;
 }
 
 PairStore::PairStore(std::filesystem::path file, std::size_t max_peers)
@@ -363,13 +532,36 @@ PairStore::PairStore(std::filesystem::path file, std::size_t max_peers)
 
 bool PairStore::load(std::vector<Peer>& out, std::string& err) const
 {
-    return read_rows(file_, out, err);
+    std::string identity;
+    return read_doc(file_, identity, out, err);
+}
+
+bool PairStore::load_identity(std::string& identity, std::vector<Peer>& out, std::string& err) const
+{
+    return read_doc(file_, identity, out, err);
+}
+
+bool PairStore::write(std::string_view identity, const std::vector<Peer>& rows, std::string& err) const
+{
+    if (rows.size() > max_peers_) {
+        err = "too many paired devices";
+        return false;
+    }
+    for (const auto& row : rows) {
+        if (!peer_id_valid(row.id)) {
+            err = "the pair file has a device id that is not valid";
+            return false;
+        }
+    }
+    std::lock_guard<std::mutex> lock(store_mutex());
+    return write_doc(file_, identity, rows, err);
 }
 
 bool PairStore::find(std::string_view id, Peer& out, std::string& err) const
 {
     std::vector<Peer> rows;
-    if (!read_rows(file_, rows, err))
+    std::string identity;
+    if (!read_doc(file_, identity, rows, err))
         return false;
     const Peer* row = row_of(rows, id);
     if (!row) {
@@ -389,7 +581,8 @@ bool PairStore::ensure_peer(std::string_view id, std::string_view name, std::str
     }
     std::lock_guard<std::mutex> lock(store_mutex());
     std::vector<Peer> rows;
-    if (!read_rows(file_, rows, err))
+    std::string identity;
+    if (!read_doc(file_, identity, rows, err))
         return false;
     const std::string now = media::utc_now_iso8601();
     if (Peer* row = row_of(rows, id)) {
@@ -401,7 +594,7 @@ bool PairStore::ensure_peer(std::string_view id, std::string_view name, std::str
             row->tls_fp = fp;
         row->last_seen = now;
         out = *row;
-        return write_rows(file_, rows, err);
+        return write_doc(file_, identity, rows, err);
     }
     if (rows.size() >= max_peers_) {
         // A revoked row gives up its place. A paired one never does.
@@ -422,7 +615,7 @@ bool PairStore::ensure_peer(std::string_view id, std::string_view name, std::str
     peer.created = now;
     peer.last_seen = now;
     rows.push_back(peer);
-    if (!write_rows(file_, rows, err))
+    if (!write_doc(file_, identity, rows, err))
         return false;
     out = std::move(peer);
     return true;
@@ -433,7 +626,8 @@ bool PairStore::issue_token(std::string_view id, std::string& token, std::string
     token.clear();
     std::lock_guard<std::mutex> lock(store_mutex());
     std::vector<Peer> rows;
-    if (!read_rows(file_, rows, err))
+    std::string identity;
+    if (!read_doc(file_, identity, rows, err))
         return false;
     Peer* row = row_of(rows, id);
     if (!row || row->trust != Trust::Paired) {
@@ -448,8 +642,9 @@ bool PairStore::issue_token(std::string_view id, std::string& token, std::string
     std::string fresh = "tn1_" + media::strutil::base64url(raw.data(), raw.size());
     row->token_sha256 = sha256_hex(fresh);
     row->last_seen = media::utc_now_iso8601();
-    if (!write_rows(file_, rows, err))
+    if (!write_doc(file_, identity, rows, err))
         return false;
+    pm::node::sessions_cancel(id, "");
     token = std::move(fresh);
     return true;
 }
@@ -477,7 +672,8 @@ bool PairStore::set_grant(std::string_view id, VfsGrant vfs, const std::vector<s
     }
     std::lock_guard<std::mutex> lock(store_mutex());
     std::vector<Peer> rows;
-    if (!read_rows(file_, rows, err))
+    std::string identity;
+    if (!read_doc(file_, identity, rows, err))
         return false;
     Peer* row = row_of(rows, id);
     if (!row || row->trust != Trust::Paired) {
@@ -488,8 +684,9 @@ bool PairStore::set_grant(std::string_view id, VfsGrant vfs, const std::vector<s
         row->outbound.vfs = vfs;
         row->outbound.networks = std::move(clean);
         ++row->outbound.revision;
-        if (!write_rows(file_, rows, err))
+        if (!write_doc(file_, identity, rows, err))
             return false;
+        pm::node::sessions_cancel(id, "files");
     }
     out = *row;
     return true;
@@ -499,7 +696,8 @@ bool PairStore::revoke(std::string_view id, std::string& err) const
 {
     std::lock_guard<std::mutex> lock(store_mutex());
     std::vector<Peer> rows;
-    if (!read_rows(file_, rows, err))
+    std::string identity;
+    if (!read_doc(file_, identity, rows, err))
         return false;
     Peer* row = row_of(rows, id);
     if (!row) {
@@ -509,17 +707,20 @@ bool PairStore::revoke(std::string_view id, std::string& err) const
     if (row->trust == Trust::Revoked)
         return true;
     row->trust = Trust::Revoked;
-    row->outbound.vfs = VfsGrant::Off;
-    row->outbound.networks.clear();
+    clear_caps(row->outbound);
     ++row->outbound.revision;
-    return write_rows(file_, rows, err);
+    if (!write_doc(file_, identity, rows, err))
+        return false;
+    pm::node::sessions_cancel(id, "");
+    return true;
 }
 
 bool PairStore::repair(std::string_view id, Peer& out, std::string& err) const
 {
     std::lock_guard<std::mutex> lock(store_mutex());
     std::vector<Peer> rows;
-    if (!read_rows(file_, rows, err))
+    std::string identity;
+    if (!read_doc(file_, identity, rows, err))
         return false;
     Peer* row = row_of(rows, id);
     if (!row) {
@@ -529,12 +730,12 @@ bool PairStore::repair(std::string_view id, Peer& out, std::string& err) const
     if (row->trust != Trust::Paired) {
         row->trust = Trust::Paired;
         row->token_sha256.clear();
-        row->outbound.vfs = VfsGrant::Off;
-        row->outbound.networks.clear();
+        clear_caps(row->outbound);
         ++row->outbound.revision;
         row->last_seen = media::utc_now_iso8601();
-        if (!write_rows(file_, rows, err))
+        if (!write_doc(file_, identity, rows, err))
             return false;
+        pm::node::sessions_cancel(id, "");
     }
     out = *row;
     return true;
@@ -546,8 +747,9 @@ Access PairStore::authorize(std::string_view token) const
     if (token.size() < 8 || token.size() > 256 || token.substr(0, 4) != "tn1_")
         return access;
     std::vector<Peer> rows;
+    std::string identity;
     std::string err;
-    if (!read_rows(file_, rows, err))
+    if (!read_doc(file_, identity, rows, err))
         return access;
     const std::string hash = sha256_hex(token);
     for (const auto& row : rows) {
@@ -563,8 +765,9 @@ Access PairStore::authorize(std::string_view token) const
 bool PairStore::any_peer_on(std::string_view local_ipv4) const
 {
     std::vector<Peer> rows;
+    std::string identity;
     std::string err;
-    if (!read_rows(file_, rows, err))
+    if (!read_doc(file_, identity, rows, err))
         return false;
     for (const auto& row : rows) {
         if (row.trust == Trust::Paired && network_granted(row.outbound, local_ipv4))

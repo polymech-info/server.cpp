@@ -2,25 +2,14 @@
 
 #include "pm/server/options.hpp"
 
+#include "string/string_utils.hpp"
+
 #include <cctype>
 
 namespace media_cli {
 namespace node_detail {
 
 lan::Service* g_lan = nullptr;
-
-namespace {
-
-std::string trim_copy(std::string s)
-{
-    const std::size_t first = s.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos)
-        return {};
-    const std::size_t last = s.find_last_not_of(" \t\r\n");
-    return s.substr(first, last - first + 1);
-}
-
-} // namespace
 
 bool is_loopback_addr(std::string_view addr)
 {
@@ -50,11 +39,11 @@ std::vector<std::string> request_secrets(const httplib::Request& req)
 {
     std::vector<std::string> out;
     auto add = [&](std::string s) {
-        s = trim_copy(std::move(s));
+        s = media::strutil::trim(std::move(s));
         if (!s.empty())
             out.push_back(std::move(s));
     };
-    const std::string auth = trim_copy(req.get_header_value("Authorization"));
+    const std::string auth = media::strutil::trim(req.get_header_value("Authorization"));
     if (auth.size() >= 7) {
         bool bearer = true;
         const char pfx[] = "bearer ";

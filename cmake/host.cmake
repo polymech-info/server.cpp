@@ -10,16 +10,6 @@ if(NOT PM_SERVER_ROOT)
 endif()
 include("${PM_SERVER_ROOT}/cmake/sources.cmake")
 
-# Folder bookmarks. The settings store stays on the host, so this file is
-# not part of pm-server-lib.
-function(pm_server_add_bookmarks target)
-  if(NOT TARGET ${target})
-    return()
-  endif()
-  pm_server_bookmark_sources(_sources)
-  target_sources(${target} PRIVATE ${_sources})
-endfunction()
-
 function(pm_server_add_lan target)
   if(NOT TARGET ${target})
     return()

@@ -12,6 +12,7 @@
 #include <iostream>
 #include <memory>
 #include <thread>
+#include <vector>
 
 namespace pm::node {
 namespace {
@@ -76,6 +77,37 @@ int run_desktop(const pm::server::ListenOptions& options, DesktopHooks hooks)
 #if defined(FEATURE_COMMAND_IPC_NEXT) && FEATURE_COMMAND_IPC_NEXT
     media::cmd_ipc::InstanceServer ipc_server;
     ipc_server.set_stop_hook([] { media::cli::request_cancel(); });
+    // The IPC socket is local admin. HTTP loopback is not. `pair` opens a ticket
+    // without the serve key; a hopped or credential-less HTTP call cannot.
+    ipc_server.add_handler([&](const nlohmann::json& req) {
+        if (req.value("action", std::string{}) != "pair")
+            return nlohmann::json();
+        if (!lan_service)
+            return nlohmann::json{{"type", "error"}, {"error", "LAN pairing is off"}};
+        std::vector<std::string> scopes = options.pair_scopes;
+        if (scopes.empty() && pm::server::scope_enabled(options.features, "files"))
+            scopes.emplace_back("files");
+        std::vector<std::string> offered;
+        for (const auto& scope : scopes) {
+            if (pm::server::scope_enabled(options.features, scope))
+                offered.push_back(scope);
+        }
+        if (offered.empty())
+            return nlohmann::json{{"type", "error"}, {"error", "no pairing scope is enabled"}};
+        media_cli::lan::PairingTicket ticket;
+        std::string err;
+        if (!lan_service->open_pairing(offered, 300, ticket, err)) {
+            return nlohmann::json{{"type", "error"},
+                                  {"error", err.empty() ? "could not open a ticket" : err}};
+        }
+        ticket.image_path = lan_service->reveal_qr(ticket);
+        return nlohmann::json{{"type", "pair"},
+                              {"ok", true},
+                              {"uri", ticket.uri},
+                              {"expires_at", ticket.expires_at},
+                              {"scopes", ticket.scopes},
+                              {"image", ticket.image_path}};
+    });
     if (hooks.attach_ipc)
         hooks.attach_ipc(ipc_server);
     std::error_code cwd_ec;

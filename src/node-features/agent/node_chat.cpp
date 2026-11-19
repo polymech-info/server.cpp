@@ -363,7 +363,8 @@ void attach_chat_host_ipc(media::cmd_ipc::InstanceServer& ipc)
 }
 #endif
 
-void register_chat_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
+void register_chat_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
+                          const std::function<std::vector<media_cli::VfsRoot>()>& shared_roots)
 {
     svr.Get("/v1/chat/commands", [require_v1_auth](const httplib::Request& req, httplib::Response& res) {
         if (!require_v1_auth(req, res))
@@ -567,7 +568,7 @@ void register_chat_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
     });
 #endif
 
-    svr.Get("/v1/chat/xblox-artifacts", [require_v1_auth](const httplib::Request& req, httplib::Response& res) {
+    svr.Get("/v1/chat/xblox-artifacts", [require_v1_auth, shared_roots](const httplib::Request& req, httplib::Response& res) {
         if (!require_v1_auth(req, res))
             return;
         nlohmann::json doc;
@@ -597,12 +598,12 @@ void register_chat_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
                 trimmed.push_back(items[i]);
             items = std::move(trimmed);
         }
-        const auto shared_roots = pm::node::bookmark_vfs_roots();
+        const auto roots = shared_roots ? shared_roots() : std::vector<media_cli::VfsRoot>{};
         for (auto& item : items) {
             if (!item.is_object())
                 continue;
             const std::string path = item.value("path", std::string{});
-            const auto shared = shared_file_for_path(path, shared_roots, "desktop");
+            const auto shared = shared_file_for_path(path, roots, "desktop");
             if (shared && !shared->rel.empty())
                 item["uri"] = shared->uri;
         }

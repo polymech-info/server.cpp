@@ -6,8 +6,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -570,6 +573,44 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
         if (req.body.size() > k_max_body) {
             send_json(res, 413, fail_body("EFBIG", "write is larger than 8MB"));
             return;
+        }
+        std::filesystem::path partial;
+        if (access.still_granted) {
+            std::error_code ec;
+            partial = std::filesystem::temp_directory_path(ec) /
+                      ("tanit-vfs-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            if (ec) {
+                send_json(res, 500, fail_body("EIO", "could not open a partial file"));
+                return;
+            }
+            std::ofstream out(partial, std::ios::binary | std::ios::trunc);
+            if (!out) {
+                send_json(res, 500, fail_body("EIO", "could not open a partial file"));
+                return;
+            }
+            constexpr std::size_t chunk = 64u * 1024u;
+            bool cancelled = false;
+            for (std::size_t at = 0; at < req.body.size() && !cancelled; at += chunk) {
+                if (!access.still_granted()) {
+                    cancelled = true;
+                    break;
+                }
+                const std::size_t n = std::min(chunk, req.body.size() - at);
+                out.write(req.body.data() + at, static_cast<std::streamsize>(n));
+                if (!out)
+                    cancelled = true;
+            }
+            if (!cancelled && !access.still_granted())
+                cancelled = true;
+            out.close();
+            std::filesystem::remove(partial, ec);
+            if (cancelled) {
+                nlohmann::json body = fail_body("EGRANT", "the grant changed during the write");
+                if (access.grant_revision > 0)
+                    body["revision"] = access.grant_revision;
+                send_json(res, 403, body);
+                return;
+            }
         }
         Located loc;
         std::string err;

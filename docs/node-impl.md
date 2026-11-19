@@ -15,7 +15,7 @@ The pair store and the bookmark file moved after the last link. No behavior chan
 | Commit | Does | Check |
 |---|---|---|
 | 0.1 | Relink `tanit` and `tanit-cli` | Both link |
-| 0.2 | Build `tanit_node_phone` with the NDK. Its list is `vfs.cpp`, `peer/listener.cpp`, `peer/pair_store.cpp`, `vfs_bookmarks.cpp`, `android/node.cpp`, `android/vfs_listener.cpp` | The phone image builds |
+| 0.2 | Build `tanit_node_phone` with the NDK. Its list is `vfs.cpp`, `listener.cpp`, `pair_store.cpp`, `sessions.cpp`, `node.cpp`, `vfs_listener.cpp`. Bookmark rows are passed in | The phone image builds |
 | 0.3 | `CMakePresets.json` for the standalone `pm-server` CLI | `npm run test:pm-server` |
 | 0.4 | Harden `PairStore` before it becomes the desktop owner. Read `audio` and `video` as well as writing them. Replace an existing file atomically on Windows. Make the row limit a host policy: 16 on the phone, 64 on the desktop | Grant round-trip, second write to the same file, interrupted-write fixture, 16-row phone and 64-row desktop tests |
 
@@ -83,12 +83,12 @@ Exit: both listeners enforce the same grants, and a route nobody registered is 4
 
 | Commit | Does | Check |
 |---|---|---|
-| 3.1 | Define version 2 before touching the desktop file. One owner writes it. It preserves the desktop identity, device id, name, token hash, timestamps, revocation, `tls_fp`, and all scopes. Legacy `files` maps to vfs write because it permits write today; `audio`, `video`, `chat`, and `tools` become explicit capabilities. Unknown scopes and invalid ids abort migration instead of being skipped. The desktop limit is 64; the phone limit remains 16 | Old and new fixtures: active, revoked, invalid id, unknown scope, 64 rows, interrupted migration, rollback, and audio/video round-trip |
-| 3.2 | Back up `devices.json`, convert once, fsync the new file, atomically replace, then mark the version. After success, `PairStore` is the only writer. The legacy code may read version 2 during the compatibility release but may not rewrite it. The device id stays the `vfs://` label; `peer_fp` stays empty; there is no `pm::room` step | An already-paired desktop still accepts its phone. A failed conversion leaves the original byte-for-byte. A new pair writes only version 2 |
-| 3.3 | `node-core/routes` joins `pm-server-lib`. The phone listener uses `RoutePolicy` and deletes its three checks. `route_enabled` returns 404 for unknown `/v1/`. The serve key carries the explicit startup capability set. `node-transports/ipc` injects `LocalAdmin`; loopback is not admin | The same route and grant return the same status on desktop and phone. Serve key, IPC admin, local agent, and remote pair are distinct |
-| 3.4 | Add a session registry keyed by peer id, capability, and accepted grant revision. Streaming providers and capture sessions register cancellation handles. Revoke or grant narrowing publishes an event that closes matching response streams and sessions. Uploads recheck revision while consuming chunks and remove partial files on cancellation | Revoke audio and video after several chunks and observe prompt socket closure. Narrow a grant during an upload and observe refusal plus temp-file cleanup. Replay is 401; wrong capability is 403; outside-mount path is refused |
+| 3.1 | Version 2 is the only schema `PairStore` writes. One owner. A ticket-scope desktop file is imported once and is not read again: identity, device id, name, token hash, timestamps, revocation, and scopes are kept. Legacy `files` maps to vfs write; `audio`, `video`, `chat`, and `tools` are explicit capabilities. Unknown scopes and invalid ids abort and leave the file untouched. Desktop limit 64, phone limit 16. No compatibility reader | A new pair writes only version 2. A bad ticket file is unchanged. Audio, video, chat, and tools round-trip |
+| 3.2 | The import backs up `devices.json`, flushes the new file, and replaces it. After that, `PairStore` is the only writer. The device id stays the `vfs://` label; `tls_fp` stays empty until phase 1; `peer_fp` stays empty; there is no `pm::room` step | A failed conversion leaves the original file. The next read of a converted file does not import again |
+| 3.3 | Done for the grant table. Desktop and phone both use `route_grant`. The phone still admits by token and network, then applies that grant. Unknown `/v1/` is 404. The agent serve key is `files`, `audio`, `video`, `chat`, `tools`. `node serve` adds `audio` and `video` only when those features are on. Local admin on HTTP is that key without a proxy hop. IPC action `pair` is local admin | A files token reads vfs, is 403 on audio, and is 404 on chat. A phone token with vfs off is 403. Loopback with no key is 401 |
+| 3.4 | Done for the registry. A live call is keyed by peer, capability, and revision. Revoke cancels that peer. Narrowing vfs cancels `files`. An upload re-reads the grant between chunks and deletes the partial. Audio stops on cancel and re-checks the token. Old-schema migration is not a test | `lan-grant` covers the cancel. A files key is still 404 on chat. A revoked token is 401 |
 
-The old ticket-scope parser stays only as a version 1 migration reader until phase 6. It is not a second writer after 3.2.
+The ticket-scope parser is the one-shot import. It is not a writer, and it does not stay as a reader of version 2.
 
 ## 4. Features that are not the agent
 
@@ -96,8 +96,8 @@ Exit: vfs, audio, and video answer on a node with `llm` off, when the binary con
 
 | Commit | Does | Check |
 |---|---|---|
-| 4.1 | Move `node_audio.cpp` and `node_video.cpp` to `node-features/audio` and `node-features/video`. Split `POST /v1/video/control` into `node-features/control`. They include the core header and register on the router. Control stays off on the phone. `node_features()` adds `audio` and `video` when capture is compiled | `node serve` with the LLM feature off serves a microphone and a camera. The phone image builds with control off |
-| 4.2 | `RoutePolicy.max_body` per route. Vfs write stays 8 MiB. Agent completions stay 500 MiB. `node serve` stays 9 MiB. A stream inherits neither cap | A vfs write over 8 MiB is refused on both verbs. A completion over 9 MiB still runs under `llm agent --serve` |
+| 4.1 | Done for the include cut and the mount. `node_audio.cpp` and `node_video.cpp` include the capture headers and the node gate, not the agent header. `node serve` mounts them when capture is compiled, and `video_control` stays off. `POST /v1/video/control` still lives in the video host; it is not a separate feature file, and the handlers are not on the unused router type | `test:node-serve`: a files token is 403 on audio, the serve key reaches audio, and video control is 404 |
+| 4.2 | Done as host defaults. `ListenOptions.payload_max` is 9 MiB and `http_workers` is 8. The phone listener hardcodes 9 MiB and 4 workers. The agent sets 500 MiB and keeps `InflightGate` on LLM routes only. vfs refuses a write over 8 MiB. `RoutePolicy.max_body` is unused. A stream is not a request body | `test:llm-server` refuses a body over 500 MiB. `node serve` keeps the 9 MiB default |
 | 4.3 | When a WebRTC path exists, its signaling is a route on the router and the negotiated fingerprint is checked against the pair. `node-transports/webrtc` is empty until that route exists. Media keeps SRTP | No files, and no work, until a media path needs signaling |
 
 ## 5. One E2EE use

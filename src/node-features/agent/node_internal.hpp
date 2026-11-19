@@ -10,7 +10,7 @@
 // httplib (winsock2) comes in here, ahead of any header that pulls windows.h.
 #include "pm/server/vfs.hpp"
 #include "pm/node/lan_routes.hpp"
-#include "pm/node/vfs_bookmarks.hpp"
+#include "pm/node/media_routes.hpp"
 #include "lan/tanit_lan.hpp"
 
 #include "pm_image_cli_helpers.hpp"
@@ -255,8 +255,6 @@ using media::llm::agent::cliopt::usage_fields;
 using media::llm::agent::cliopt::utc_now_iso;
 using media::llm::agent::cliopt::victoria_target;
 
-void stop_llm_video_host();
-void stop_llm_audio_host();
 void install_chat_event_sources();
 void register_cli_host_tool_providers(const AgentServerOptions& opt);
 
@@ -271,11 +269,10 @@ std::wstring wide_from_utf8(const std::string& text);
 void register_host_routes(httplib::Server& svr, const AuthFn& require_v1_auth);
 void register_llm_routes(httplib::Server& svr, const AgentServerOptions& opt, InflightGate& gate,
                          const AuthFn& require_v1_auth);
-void register_chat_routes(httplib::Server& svr, const AuthFn& require_v1_auth);
+void register_chat_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
+                          const std::function<std::vector<media_cli::VfsRoot>()>& shared_roots);
 void register_realtime_routes(httplib::Server& svr, const AgentServerOptions& opt,
                               const AuthFn& require_v1_auth);
-void register_video_routes(httplib::Server& svr, const AuthFn& require_v1_auth);
-void register_audio_routes(httplib::Server& svr, const AuthFn& require_v1_auth);
 void register_log_routes(httplib::Server& svr, const AuthFn& require_v1_auth);
 
 } // namespace node_detail

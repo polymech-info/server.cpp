@@ -9,8 +9,10 @@
 #include "logging/logger.h"
 #include "pm/node/node.hpp"
 #include "pm/node/peer_listener.hpp"
-#include "pm/node/vfs_bookmarks.hpp"
+#include "pm/server/shared_folder.hpp"
 #include "pm/server/vfs.hpp"
+
+#include "string/string_utils.hpp"
 
 #include <android/log.h>
 #include <nlohmann/json.hpp>
@@ -54,24 +56,19 @@ std::filesystem::path pair_file(const std::string& profile_dir)
     return std::filesystem::path(profile_dir) / "lan" / "devices.json";
 }
 
-bool starts_with(const std::string& text, const char* prefix)
-{
-    return text.rfind(prefix, 0) == 0;
-}
-
 std::string network_kind(const std::string& name, const std::string& address)
 {
-    if (name == "lo" || starts_with(address, "127."))
+    if (name == "lo" || media::strutil::starts_with_ascii_ci(address, "127."))
         return "local";
-    if (starts_with(name, "tun") || starts_with(name, "tailscale") || starts_with(name, "wg")
-        || starts_with(name, "ppp") || pm::lan::cidr_contains("100.64.0.0/10", address))
+    if (media::strutil::starts_with_ascii_ci(name, "tun") || media::strutil::starts_with_ascii_ci(name, "tailscale") || media::strutil::starts_with_ascii_ci(name, "wg")
+        || media::strutil::starts_with_ascii_ci(name, "ppp") || pm::lan::cidr_contains("100.64.0.0/10", address))
         return "vpn";
-    if (starts_with(name, "wlan") || starts_with(name, "swlan") || starts_with(name, "ap"))
+    if (media::strutil::starts_with_ascii_ci(name, "wlan") || media::strutil::starts_with_ascii_ci(name, "swlan") || media::strutil::starts_with_ascii_ci(name, "ap"))
         return "wifi";
-    if (starts_with(name, "rmnet") || starts_with(name, "ccmni") || starts_with(name, "pdp")
-        || starts_with(name, "radio"))
+    if (media::strutil::starts_with_ascii_ci(name, "rmnet") || media::strutil::starts_with_ascii_ci(name, "ccmni") || media::strutil::starts_with_ascii_ci(name, "pdp")
+        || media::strutil::starts_with_ascii_ci(name, "radio"))
         return "mobile";
-    if (starts_with(name, "eth") || starts_with(name, "usb") || starts_with(name, "rndis"))
+    if (media::strutil::starts_with_ascii_ci(name, "eth") || media::strutil::starts_with_ascii_ci(name, "usb") || media::strutil::starts_with_ascii_ci(name, "rndis"))
         return "ethernet";
     return "other";
 }
@@ -102,7 +99,7 @@ std::vector<LocalNetwork> local_networks()
         if (!inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf)))
             continue;
         const std::string address(buf);
-        if (starts_with(address, "169.254."))
+        if (media::strutil::starts_with_ascii_ci(address, "169.254."))
             continue;
         const auto* mask = reinterpret_cast<sockaddr_in*>(it->ifa_netmask);
         LocalNetwork net;
@@ -189,7 +186,7 @@ PhoneVfsInfo phone_vfs_sync(const std::string& profile_dir)
     if (!profile_ok(profile_dir))
         return info;
     media::portable_settings::set_profile_dir_override(profile_dir);
-    if (bookmark_vfs_roots().empty()) {
+    if (pm::server::shared_folder_roots().empty()) {
         g_listener.stop();
         return info;
     }
@@ -211,7 +208,7 @@ PhoneVfsInfo phone_vfs_sync(const std::string& profile_dir)
     host.role = "phone";
     host.authority = authority;
     host.pair_file = pair_file(profile_dir);
-    host.roots = [] { return bookmark_vfs_roots(); };
+    host.roots = [] { return pm::server::shared_folder_roots(); };
     host.enter = [profile_dir] { media::portable_settings::set_profile_dir_override(profile_dir); };
     host.log = note;
     if (!g_listener.start(std::move(host), err)) {
@@ -239,7 +236,7 @@ PhoneVfsInfo phone_vfs_status(std::string& uris_json)
         return info;
     media::portable_settings::set_profile_dir_override(g_profile);
     nlohmann::json uris = nlohmann::json::array();
-    for (const auto& root : bookmark_vfs_roots())
+    for (const auto& root : pm::server::shared_folder_roots())
         uris.push_back("vfs://" + g_authority + "/" + root.name);
     uris_json = uris.dump();
     return info;

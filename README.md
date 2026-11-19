@@ -20,7 +20,7 @@ The target source groups are [node-core](src/node-core/README.md),
 | Bearer parse | [secret.hpp](src/base/include/pm/server/secret.hpp) | header only |
 | Pair file | [pair_store.cpp](src/node-core/pair/pair_store.cpp), [pair_store.hpp](src/tanit-node/include/lan/pair_store.hpp) | `pm-server-lib`, and the phone image. Grant, trust, and the token hash |
 | Paired-peer listener | [listener.cpp](src/node-core/lifecycle/listener.cpp), [peer_listener.hpp](src/tanit-node/include/pm/node/peer_listener.hpp) | `pm-server-lib`, and the phone image |
-| Shared folders | [vfs_bookmarks.cpp](src/node-features/vfs/vfs_bookmarks.cpp) | host and the phone image. Reads the settings store; the library does not |
+| Shared folders | [shared_folder.hpp](src/base/include/pm/server/shared_folder.hpp) | header only. Parsed bookmark rows become mount roots. The host reads the settings store |
 | Desktop listener | [node.cpp](src/node-features/agent/node.cpp) and [node_llm](src/node-features/agent/node_llm.cpp), [node_chat](src/node-features/agent/node_chat.cpp), [node_realtime](src/node-features/agent/node_realtime.cpp), [node_audio](src/node-features/audio/node_audio.cpp), [node_video](src/node-features/video/node_video.cpp), [node_host](src/node-features/agent/node_host.cpp), [node_lan](src/node-features/agent/node_lan.cpp) | host, via `pm_llm_sources(cli)`. Includes the agent and settings |
 | LAN proxy | [lan_win.cpp](src/node-transports/desktop/lan_win.cpp) / [lan_stub.cpp](src/node-transports/desktop/lan_stub.cpp), [lan_qr.cpp](src/node-transports/desktop/lan_qr.cpp) | `pm_server_add_lan` |
 | mDNS | [mdns_win.cpp](src/node-transports/desktop/mdns_win.cpp) / [mdns_stub.cpp](src/node-transports/desktop/mdns_stub.cpp) | `pm_server_add_mdns` |
@@ -29,7 +29,7 @@ The target source groups are [node-core](src/node-core/README.md),
 | Source ownership | [sources.cmake](cmake/sources.cmake) | canonical portable, transport, agent, bookmark, and phone groups while files move |
 | Version CLI | [cli/main.cpp](cli/main.cpp) | top-level `pm-server` only. The host does not build it |
 
-Shared bookmarks are [vfs_bookmarks.hpp](src/tanit-node/include/pm/node/vfs_bookmarks.hpp). The listener entry for both hosts is [node.hpp](src/tanit-node/include/pm/node/node.hpp).
+Shared folders are [shared_folder.hpp](src/base/include/pm/server/shared_folder.hpp). The listener entry for both hosts is [node.hpp](src/tanit-node/include/pm/node/node.hpp).
 
 ## Integration
 
@@ -58,6 +58,6 @@ Class, flow, and sequence diagrams, in Mermaid.
 
 Design and the todo list are in [docs/tanit-mesh.md](../../docs/tanit-mesh.md), sections 10 and 11. The commits are in [docs/node-impl.md](docs/node-impl.md). First the three link fixes already due, then TLS on the phone listener, with the pin checked before the token. Then a `node serve` verb that listens without the agent, so a build with `FEATURE_COMMAND_LLM` off can receive a phone folder.
 
-- Desktop route files still include the agent. Those routes are the agent. The pair file and the grant check now live in this package. Paths, strings, and logging stay in [commons.cpp](../commons.cpp/README.md). The settings store is read only from [vfs_bookmarks.cpp](src/node-features/vfs/vfs_bookmarks.cpp), which the host compiles.
+- Desktop route files still include the agent. Those routes are the agent. The pair file and the grant check now live in this package. Paths, strings, and logging stay in [commons.cpp](../commons.cpp/README.md). The host reads bookmark rows from the settings store and passes them in.
 - Treat [encryption.cpp](../encryption.cpp/README.md) as the protocol library. `pm::host::Device`, `media-host`, and `pm-encryption server` exist to exercise frames on a loopback. They are not the product host.
 - New features on this node, not a second server. Audio and video are route groups beside vfs, including when the agent is off. `encryption.cpp` stays unlinked until a feature has to hide bytes from a store the peer is not serving. An in-process LLM is a local principal, not a paired device.

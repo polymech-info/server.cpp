@@ -31,8 +31,11 @@ struct Grant {
     /// Counts local edits. The order of two grants is this number, not a clock.
     int revision = 1;
     VfsGrant vfs = VfsGrant::Off;
+    /// `on` or `off`. A files scope is `vfs`, not one of these.
     std::string audio = "off";
     std::string video = "off";
+    std::string chat = "off";
+    std::string tools = "off";
     /// IPv4 networks (`192.168.1.0/24`) this peer may reach this device on.
     /// Empty means none. A network that appears later is not added.
     std::vector<std::string> networks;
@@ -78,6 +81,11 @@ struct Access {
 /// Stable row id for a peer known by a fingerprint or an address: 16 hex of its SHA-256.
 [[nodiscard]] std::string derive_peer_id(std::string_view key);
 [[nodiscard]] bool peer_id_valid(std::string_view id) noexcept;
+/// `files`, `audio`, `video`, `chat`, or `tools`.
+[[nodiscard]] bool grant_scope_known(std::string_view scope) noexcept;
+/// `files` becomes vfs write. The others become `on`.
+bool grant_set_scope(Grant& grant, std::string_view scope);
+[[nodiscard]] std::vector<std::string> grant_scopes(const Grant& grant);
 
 class PairStore {
 public:
@@ -85,8 +93,13 @@ public:
 
     [[nodiscard]] const std::filesystem::path& file() const noexcept { return file_; }
 
-    /// A missing file is an empty list.
+    /// A missing file is an empty list. Version 2 is the only schema this writes.
+    /// A phone file that already uses `version` 1 is read. A desktop ticket file
+    /// (`v` plus `scopes`) is refused here; the desktop imports it once.
     bool load(std::vector<Peer>& out, std::string& err) const;
+    bool load_identity(std::string& identity, std::vector<Peer>& out, std::string& err) const;
+    /// Replaces the file. `rows` must already be valid. The desktop limit is the caller's.
+    bool write(std::string_view identity, const std::vector<Peer>& rows, std::string& err) const;
     bool find(std::string_view id, Peer& out, std::string& err) const;
 
     /// Adds the row when it is missing: paired, vfs off, no network, revision 1.

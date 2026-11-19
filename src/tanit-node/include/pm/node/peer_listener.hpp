@@ -4,13 +4,13 @@
 // health, the grant route, and vfs mounted. A phone runs it today. Nothing in
 // it is Android: the host supplies the name, the folders, and the networks.
 //
-// Every request passes three checks, in this order, on the device that owns
-// the folders:
+// Every request is admitted, then judged by the same route grant as the desktop:
 //   1. The address the request arrived on is inside a network some paired
 //      peer was granted. Otherwise 403, before any route runs.
-//   2. The bearer is a token in the pair file. Otherwise 401: pair again.
-//   3. That peer's own grant covers this network and this verb. Otherwise
-//      403 with the grant revision: the permission is off.
+//   2. A `/v1/` path this process did not enable is 404.
+//   3. The bearer is a token in the pair file. Otherwise 401: pair again.
+//   4. That peer's grant covers this network, and `route_grant` for the path.
+//      Otherwise 403 with the grant revision.
 
 #include "lan/pair_store.hpp"
 #include "pm/server/vfs_root.hpp"

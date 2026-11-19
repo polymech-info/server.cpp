@@ -3,6 +3,7 @@
 
 #include "pm/node/peer_listener.hpp"
 
+#include "pm/server/features.hpp"
 #include "pm/server/secret.hpp"
 #include "pm/server/vfs.hpp"
 
@@ -141,11 +142,17 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
     server->set_pre_routing_handler([shared](const httplib::Request& req, httplib::Response& res) {
         if (shared->host.enter)
             shared->host.enter();
-        if (shared->store.any_peer_on(req.local_addr))
-            return httplib::Server::HandlerResponse::Unhandled;
-        shared->note(true, shared->where(req) + " deny network");
-        send(res, 403, refusal("ENETWORK", "This network is not granted."));
-        return httplib::Server::HandlerResponse::Handled;
+        if (!shared->store.any_peer_on(req.local_addr)) {
+            shared->note(true, shared->where(req) + " deny network");
+            send(res, 403, refusal("ENETWORK", "This network is not granted."));
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        if (req.path.rfind("/v1/", 0) == 0
+            && !pm::server::route_enabled(pm::server::phone_features(), req.path)) {
+            send(res, 404, refusal("ENOTFOUND", "That route is not on this device."));
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        return httplib::Server::HandlerResponse::Unhandled;
     });
 
     server->Get("/health", [shared](const httplib::Request&, httplib::Response& res) {
@@ -173,6 +180,8 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
                 {"vfs", pm::lan::vfs_grant_name(peer.outbound.vfs)},
                 {"audio", peer.outbound.audio},
                 {"video", peer.outbound.video},
+                {"chat", peer.outbound.chat},
+                {"tools", peer.outbound.tools},
             }},
         });
     });
@@ -186,11 +195,12 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
         pm::lan::Peer peer;
         if (!shared->admit(req, res, peer))
             return false;
-        if (peer.outbound.vfs == pm::lan::VfsGrant::Off) {
-            shared->note(true, shared->where(req) + " deny grant=off peer=" + peer.id);
+        const pm::server::RouteGrant need = pm::server::route_grant(req.path);
+        if (need != pm::server::RouteGrant::Files || peer.outbound.vfs == pm::lan::VfsGrant::Off) {
+            shared->note(true, shared->where(req) + " deny grant peer=" + peer.id);
             nlohmann::json body = refusal("EGRANT", "Folder access is off for this device.");
             body["revision"] = peer.outbound.revision;
-            body["vfs"] = "off";
+            body["vfs"] = pm::lan::vfs_grant_name(peer.outbound.vfs);
             send(res, 403, body);
             return false;
         }
@@ -198,6 +208,18 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
         access.files = true;
         access.write = peer.outbound.vfs == pm::lan::VfsGrant::Write;
         access.grant_revision = peer.outbound.revision;
+        access.still_granted = [shared, id = peer.id, revision = peer.outbound.revision,
+                                write = access.write]() {
+            pm::lan::Peer now;
+            std::string err;
+            if (!shared->store.find(id, now, err) || now.trust != pm::lan::Trust::Paired)
+                return false;
+            if (now.outbound.revision != revision)
+                return false;
+            if (write)
+                return now.outbound.vfs == pm::lan::VfsGrant::Write;
+            return now.outbound.vfs != pm::lan::VfsGrant::Off;
+        };
         shared->note(false, shared->where(req) + " allow grant="
                                 + pm::lan::vfs_grant_name(peer.outbound.vfs) + " peer=" + peer.id);
         return true;

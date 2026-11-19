@@ -4,8 +4,12 @@
 // node-core does not include the agent option header.
 
 #include "pm/server/features.hpp"
+#include "pm/server/vfs_root.hpp"
+
+#include "string/string_utils.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -30,6 +34,10 @@ struct ListenOptions {
 
     ServerFeatures features;
     std::string service = "tanit-node";
+
+    /// Folders this listener publishes. The host fills it from parsed bookmark
+    /// rows. Empty means this process shares no folders.
+    std::function<std::vector<media_cli::VfsRoot>()> vfs_roots;
 };
 
 [[nodiscard]] inline ServerFeatures node_features()
@@ -37,8 +45,16 @@ struct ListenOptions {
     ServerFeatures features;
     features.lan = true;
     features.vfs = true;
+#if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
+    features.audio = true;
+#else
     features.audio = false;
+#endif
+#if defined(FEATURE_VIDEO) && FEATURE_VIDEO && defined(FEATURE_VIDEO_STREAM) && FEATURE_VIDEO_STREAM
+    features.video = true;
+#else
     features.video = false;
+#endif
     features.video_control = false;
     features.llm = false;
     features.tools = false;
@@ -53,23 +69,12 @@ struct ListenOptions {
         || host.find("::ffff:127.") != std::string_view::npos;
 }
 
-inline void trim_option(std::string& value)
-{
-    const std::size_t first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) {
-        value.clear();
-        return;
-    }
-    const std::size_t last = value.find_last_not_of(" \t\r\n");
-    value = value.substr(first, last - first + 1);
-}
-
 /// Normalizes text fields and rejects a listener configuration that cannot be
 /// made safe. Empty means the record is ready for node-core.
 [[nodiscard]] inline std::string validate(ListenOptions& options)
 {
-    trim_option(options.host);
-    trim_option(options.service);
+    options.host = media::strutil::trim(std::move(options.host));
+    options.service = media::strutil::trim(std::move(options.service));
     if (options.host.empty())
         options.host = "127.0.0.1";
     if (options.service.empty())

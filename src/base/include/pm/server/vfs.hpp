@@ -23,6 +23,9 @@ struct LlmVfsAccess {
     /// Revision of the grant that produced this access. Zero when the caller
     /// has no pair row. A 403 for a write reports it.
     int         grant_revision = 0;
+    /// Re-read while a write is spilling. Empty means the caller has no pair
+    /// row to go stale. False means stop and delete the partial file.
+    std::function<bool()> still_granted;
 };
 
 using LlmVfsAuthorize = std::function<bool(const httplib::Request&, httplib::Response&, LlmVfsAccess&)>;

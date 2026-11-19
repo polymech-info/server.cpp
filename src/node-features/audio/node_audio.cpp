@@ -1,5 +1,20 @@
 // Desktop node: microphone, loopback, and playback routes.
-#include "../agent/node_internal.hpp"
+// Capture types live in pm/audio. Authorization is the node gate.
+#include "pm/node/lan_gate.hpp"
+#include "pm/node/lan_routes.hpp"
+#include "pm/node/sessions.hpp"
+
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+
+#include <chrono>
+#include <memory>
+#include <string>
+
+#if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
+#include "pm/audio/source_host.hpp"
+#include "pm/audio/sink_host.hpp"
+#endif
 
 namespace media_cli {
 namespace node_detail {
@@ -98,9 +113,36 @@ void register_audio_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
             res.set_header("Cache-Control", "no-cache");
             res.set_header("X-Audio-Sample-Rate", std::to_string(idle.body.value("sampleRate", 48000)));
             res.set_header("X-Audio-Channels", std::to_string(idle.body.value("channels", 2)));
+            std::shared_ptr<pm::node::LiveSession> session;
+            std::string pair_token;
+            if (g_lan) {
+                lan::DeviceAuth dev;
+                for (const auto& secret : request_secrets(req)) {
+                    if (!g_lan->authorize(secret, dev) || !dev.has("audio"))
+                        continue;
+                    pair_token = secret;
+                    session = std::make_shared<pm::node::LiveSession>(dev.id, "audio", 0);
+                    break;
+                }
+            }
+            auto checked = std::make_shared<std::chrono::steady_clock::time_point>(
+                std::chrono::steady_clock::now());
             res.set_chunked_content_provider(
                 "application/octet-stream",
-                [host](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                [host, session, pair_token, checked](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                    if (session && session->cancelled()) {
+                        sink.done();
+                        return false;
+                    }
+                    const auto now = std::chrono::steady_clock::now();
+                    if (session && g_lan && now - *checked > std::chrono::seconds(2)) {
+                        *checked = now;
+                        lan::DeviceAuth dev;
+                        if (!g_lan->authorize(pair_token, dev) || !dev.has("audio")) {
+                            sink.done();
+                            return false;
+                        }
+                    }
                     std::int16_t buf[960];
                     const int frames = host->pull(buf, 480, 200);
                     if (frames < 0) {
@@ -213,7 +255,7 @@ void register_audio_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
         if (!require_v1_auth(req, res))
             return;
         res.status = 501;
-        res.set_content(openai_error("audio sources are not built into this binary", "server_error",
+        res.set_content(route_error("audio sources are not built into this binary", "server_error",
                                      "audio_unavailable")
                             .dump(),
                         "application/json");

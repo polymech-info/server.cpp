@@ -3,7 +3,7 @@
 #include "pm/node/desktop_gate.hpp"
 #include "pm/node/desktop_run.hpp"
 #include "pm/node/lan_routes.hpp"
-#include "pm/node/vfs_bookmarks.hpp"
+#include "pm/node/media_routes.hpp"
 
 #include "logging/logger.h"
 
@@ -22,7 +22,9 @@ void mount_node(httplib::Server& server, const pm::server::ListenOptions& option
     };
     media_cli::LlmVfsHost vfs_host;
     vfs_host.authority = "desktop";
-    vfs_host.roots = [] { return bookmark_vfs_roots(); };
+    vfs_host.roots = options.vfs_roots
+        ? options.vfs_roots
+        : [] { return std::vector<media_cli::VfsRoot>{}; };
     vfs_host.authorize = [options](const httplib::Request& req, httplib::Response& res,
                                    media_cli::LlmVfsAccess& access) {
         return media_cli::node_detail::desktop_authorize_vfs(options, req, res, access);
@@ -42,6 +44,10 @@ void mount_node(httplib::Server& server, const pm::server::ListenOptions& option
         res.set_content(nlohmann::json{{"ok", true}, {"ready", true}}.dump(), "application/json");
     });
     media_cli::node_detail::register_lan_routes(server, require_v1_auth, options.features);
+    if (options.features.audio)
+        media_cli::node_detail::register_audio_routes(server, require_v1_auth);
+    if (options.features.video)
+        media_cli::node_detail::register_video_routes(server, require_v1_auth);
 }
 
 } // namespace
@@ -68,6 +74,17 @@ int run_node_serve(const pm::server::ListenOptions& incoming)
         }
         options.pair_scopes = std::move(offered);
     }
+    auto grant = [&](const char* capability, bool on) {
+        if (!on)
+            return;
+        for (const auto& held : options.serve_capabilities)
+            if (held == capability)
+                return;
+        options.serve_capabilities.emplace_back(capability);
+    };
+    grant("files", options.features.vfs);
+    grant("audio", options.features.audio);
+    grant("video", options.features.video);
     if (options.serve_api_key.empty()) {
         logger::warn(std::string("node serve: no API key — loopback is not a credential on ")
                      + options.host + ":" + std::to_string(options.port));
@@ -79,6 +96,10 @@ int run_node_serve(const pm::server::ListenOptions& incoming)
 #if defined(FEATURE_COMMAND_IPC_NEXT) && FEATURE_COMMAND_IPC_NEXT
     hooks.process_kind = media::cmd_ipc::ProcessKind::Node;
 #endif
+    hooks.stopping = [] {
+        media_cli::node_detail::stop_llm_video_host();
+        media_cli::node_detail::stop_llm_audio_host();
+    };
     hooks.mount = [options](httplib::Server& server) { mount_node(server, options); };
     hooks.banner = [options](std::ostream& out) {
         const std::string base = "http://" + options.host + ":" + std::to_string(options.port);

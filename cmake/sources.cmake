@@ -11,14 +11,8 @@ function(pm_server_portable_sources out_var)
   set(${out_var}
     "${_root}/src/node-features/vfs/vfs.cpp"
     "${_root}/src/node-core/lifecycle/listener.cpp"
+    "${_root}/src/node-core/lifecycle/sessions.cpp"
     "${_root}/src/node-core/pair/pair_store.cpp"
-    PARENT_SCOPE)
-endfunction()
-
-function(pm_server_bookmark_sources out_var)
-  _pm_server_root(_root)
-  set(${out_var}
-    "${_root}/src/node-features/vfs/vfs_bookmarks.cpp"
     PARENT_SCOPE)
 endfunction()
 
@@ -89,11 +83,9 @@ endfunction()
 
 function(pm_server_phone_sources out_var)
   pm_server_portable_sources(_portable)
-  pm_server_bookmark_sources(_bookmarks)
   _pm_server_root(_root)
   set(${out_var}
     ${_portable}
-    ${_bookmarks}
     "${_root}/src/node-core/lifecycle/node.cpp"
     "${_root}/src/node-transports/phone/vfs_listener.cpp"
     PARENT_SCOPE)

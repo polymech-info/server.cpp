@@ -1,5 +1,15 @@
 // Desktop node: camera and screen routes.
-#include "../agent/node_internal.hpp"
+// Capture stays in video_stream_host. JSON parsing is json_utils. Errors use route_error.
+#include "pm/node/lan_routes.hpp"
+
+#include "json/json_utils.hpp"
+#include "video_stream_host.hpp"
+
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+
+#include <optional>
+#include <string>
 
 namespace media_cli {
 namespace node_detail {
@@ -107,7 +117,7 @@ void register_video_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
         const auto host = g_llm_video_host;
         if (!host) {
             res.status = 501;
-            res.set_content(openai_error("video streaming is not built into this binary",
+            res.set_content(route_error("video streaming is not built into this binary",
                                          "server_error", "video_unavailable")
                                 .dump(),
                             "application/json");
@@ -144,7 +154,7 @@ void register_video_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
         const auto host = g_llm_video_host;
         if (!host) {
             res.status = 501;
-            res.set_content(openai_error("video streaming is not built into this binary",
+            res.set_content(route_error("video streaming is not built into this binary",
                                          "server_error", "video_unavailable")
                                 .dump(),
                             "application/json");
@@ -161,7 +171,7 @@ void register_video_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
         if (!require_v1_auth(req, res))
             return;
         res.status = 501;
-        res.set_content(openai_error("video streaming is not built into this binary", "server_error",
+        res.set_content(route_error("video streaming is not built into this binary", "server_error",
                                      "video_unavailable")
                             .dump(),
                         "application/json");

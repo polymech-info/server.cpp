@@ -31,7 +31,7 @@ flowchart LR
         N["desktop/node.cpp<br/>node_llm, node_chat, node_realtime,<br/>node_audio, node_video, node_host, node_lan"]
         W["desktop/lan_win.cpp, lan_qr.cpp<br/>pm_server_add_lan"]
         M["desktop/mdns_win.cpp<br/>pm_server_add_mdns"]
-        B["vfs_bookmarks.cpp<br/>pm_server_add_bookmarks"]
+        B["shared_folder.hpp<br/>parsed bookmark rows"]
     end
     subgraph phone["tanit_node_phone, NDK"]
         A["android/node.cpp<br/>android/vfs_listener.cpp"]

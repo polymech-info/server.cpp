@@ -36,6 +36,8 @@
 #define SP_PROT_TLS1_3_SERVER 0x1000
 #endif
 
+#include "lan/pair_store.hpp"
+#include "pm/node/sessions.hpp"
 #include "lan/tanit_lan.hpp"
 #include "lan/tanit_lan_qr.hpp"
 #include "lan/tanit_mdns.hpp"
@@ -72,15 +74,6 @@ namespace fs = std::filesystem;
 constexpr wchar_t k_key_container[] = L"TanitLanIdentity.rsa.v1";
 constexpr int k_max_devices = 64;
 constexpr int k_max_clients = 32;
-
-std::string trim_copy(std::string s)
-{
-    while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\r' || s.front() == '\n'))
-        s.erase(s.begin());
-    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' || s.back() == '\n'))
-        s.pop_back();
-    return s;
-}
 
 bool ieq(std::string_view a, std::string_view b)
 {
@@ -145,17 +138,6 @@ std::string b64url(const std::uint8_t* p, size_t n)
     return o;
 }
 
-std::string to_hex(const std::uint8_t* p, size_t n)
-{
-    static const char* h = "0123456789abcdef";
-    std::string o(n * 2, '0');
-    for (size_t i = 0; i < n; ++i) {
-        o[i * 2]     = h[p[i] >> 4];
-        o[i * 2 + 1] = h[p[i] & 0x0F];
-    }
-    return o;
-}
-
 std::string colon_fingerprint(const std::string& hex)
 {
     std::string o;
@@ -183,7 +165,7 @@ bool sha256_hex(const std::uint8_t* p, size_t n, std::string& hex)
     BCryptCloseAlgorithmProvider(alg, 0);
     if (!BCRYPT_SUCCESS(st))
         return false;
-    hex = to_hex(hash, 32);
+    hex = media::strutil::to_hex(hash, 32);
     return true;
 }
 
@@ -261,7 +243,7 @@ std::string clean_text(std::string_view in, size_t maxn)
         if (o.size() >= maxn)
             break;
     }
-    return trim_copy(std::move(o));
+    return media::strutil::trim(std::move(o));
 }
 
 bool device_id_ok(const std::string& s)
@@ -340,83 +322,64 @@ bool read_text_file(const fs::path& path, std::string& text)
     return true;
 }
 
-struct StoredDevice {
-    std::string id;
-    std::string name;
-    std::string token_sha256;
-    std::vector<std::string> scopes;
-    std::string created;
-    std::string last_seen;
-    bool revoked = false;
-};
-
-struct DeviceFile {
-    std::string identity;
-    std::vector<StoredDevice> devices;
-};
-
-bool load_device_file(const fs::path& path, DeviceFile& out, std::string& err)
+// One pass over a ticket-scope file. A bad id or an unknown scope leaves the
+// file untouched. After this returns, the file is version 2 and this parser
+// is not used again.
+bool import_ticket_file(const fs::path& path, std::string& err)
 {
-    out = {};
     err.clear();
-    std::error_code ec;
-    if (!fs::is_regular_file(path, ec))
-        return true;
     std::string text;
     if (!read_text_file(path, text)) {
         err = "could not read paired devices";
         return false;
     }
-    nlohmann::json j = media::json::try_parse(text);
-    if (!j.is_object()) {
+    const nlohmann::json j = media::json::try_parse(text);
+    if (!j.is_object() || !j.contains("devices") || !j["devices"].is_array()) {
         err = "paired devices file is not valid JSON";
         return false;
     }
-    out.identity = j.value("identity", std::string{});
-    if (!j.contains("devices") || !j["devices"].is_array())
-        return true;
+    const std::string identity = j.value("identity", std::string{});
+    std::vector<pm::lan::Peer> peers;
     for (const auto& item : j["devices"]) {
-        if (!item.is_object())
-            continue;
-        StoredDevice d;
-        d.id = item.value("id", std::string{});
-        d.name = item.value("name", std::string{});
-        d.token_sha256 = item.value("token_sha256", std::string{});
-        d.created = item.value("created", std::string{});
-        d.last_seen = item.value("last_seen", std::string{});
-        d.revoked = item.value("revoked", false);
-        if (item.contains("scopes") && item["scopes"].is_array()) {
-            for (const auto& s : item["scopes"]) {
-                if (s.is_string())
-                    d.scopes.push_back(s.get<std::string>());
+        if (!item.is_object()) {
+            err = "paired devices file is not valid JSON";
+            return false;
+        }
+        pm::lan::Peer peer;
+        peer.id = item.value("id", std::string{});
+        if (!pm::lan::peer_id_valid(peer.id)) {
+            err = "paired devices file has a device id that is not valid";
+            return false;
+        }
+        peer.name = item.value("name", std::string{});
+        peer.token_sha256 = item.value("token_sha256", std::string{});
+        if (peer.token_sha256.size() != 64) {
+            err = "paired devices file is not valid JSON";
+            return false;
+        }
+        peer.created = item.value("created", std::string{});
+        peer.last_seen = item.value("last_seen", std::string{});
+        peer.trust = item.value("revoked", false) ? pm::lan::Trust::Revoked : pm::lan::Trust::Paired;
+        if (item.contains("scopes")) {
+            if (!item["scopes"].is_array()) {
+                err = "paired devices file has a scope that is not valid";
+                return false;
+            }
+            for (const auto& scope : item["scopes"]) {
+                if (!scope.is_string() ||
+                    !pm::lan::grant_set_scope(peer.outbound, scope.get<std::string>())) {
+                    err = "paired devices file has a scope that is not valid";
+                    return false;
+                }
             }
         }
-        if (!d.id.empty() && d.token_sha256.size() == 64)
-            out.devices.push_back(std::move(d));
+        peers.push_back(std::move(peer));
     }
-    return true;
-}
-
-bool save_device_file(const fs::path& path, const DeviceFile& file, std::string& err)
-{
-    nlohmann::json devices = nlohmann::json::array();
-    for (const auto& d : file.devices) {
-        devices.push_back({
-            {"id", d.id},
-            {"name", d.name},
-            {"token_sha256", d.token_sha256},
-            {"scopes", d.scopes},
-            {"created", d.created},
-            {"last_seen", d.last_seen},
-            {"revoked", d.revoked},
-        });
+    if (peers.size() > static_cast<std::size_t>(k_max_devices)) {
+        err = "too many paired devices";
+        return false;
     }
-    const nlohmann::json j{
-        {"v", 1},
-        {"identity", file.identity},
-        {"devices", std::move(devices)},
-    };
-    return write_text_file(path, j.dump(2), err);
+    return pm::lan::PairStore(path, static_cast<std::size_t>(k_max_devices)).write(identity, peers, err);
 }
 
 struct AdapterIp {
@@ -680,8 +643,8 @@ private:
             const auto colon = line.find(':');
             if (colon == std::string::npos)
                 continue;
-            const std::string name = trim_copy(line.substr(0, colon));
-            const std::string value = trim_copy(line.substr(colon + 1));
+            const std::string name = media::strutil::trim(line.substr(0, colon));
+            const std::string value = media::strutil::trim(line.substr(colon + 1));
             if (ieq(name, "Content-Length")) {
                 has_len = true;
                 try {
@@ -881,7 +844,7 @@ struct LanServiceImpl {
         std::chrono::steady_clock::time_point locked_until{};
     } ticket;
 
-    std::vector<StoredDevice> devices;
+    std::vector<pm::lan::Peer> devices;
     fs::file_time_type devices_mtime{};
     bool devices_loaded = false;
     std::chrono::steady_clock::time_point devices_saved{};
@@ -1090,7 +1053,7 @@ bool make_certificate(LanServiceImpl& impl, bool is_rsa, std::string& err)
         err = "could not hash the LAN public key";
         return false;
     }
-    impl.fingerprint = to_hex(hash, hash_cb);
+    impl.fingerprint = media::strutil::to_hex(hash, hash_cb);
     impl.fingerprint_colon = colon_fingerprint(impl.fingerprint);
 
     impl.store = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, nullptr);
@@ -1158,21 +1121,36 @@ bool reload_devices_unlocked(LanServiceImpl& impl, std::string& err)
         mtime = fs::last_write_time(impl.devices_path, ec);
     if (impl.devices_loaded && (!exists || (!ec && mtime == impl.devices_mtime)))
         return true;
-    DeviceFile file;
-    if (!load_device_file(impl.devices_path, file, err))
-        return false;
-    if (!file.identity.empty() && file.identity != impl.fingerprint) {
+    pm::lan::PairStore store(impl.devices_path, static_cast<std::size_t>(k_max_devices));
+    std::string identity;
+    std::vector<pm::lan::Peer> peers;
+    if (!store.load_identity(identity, peers, err)) {
+        if (err != "pair file uses ticket scopes" || !import_ticket_file(impl.devices_path, err) ||
+            !store.load_identity(identity, peers, err))
+            return false;
+    }
+    if (!identity.empty() && identity != impl.fingerprint) {
         logger::warn("lan identity changed; revoking paired phones");
-        for (auto& d : file.devices)
-            d.revoked = true;
-        file.identity = impl.fingerprint;
-        if (!save_device_file(impl.devices_path, file, err))
+        for (auto& peer : peers) {
+            peer.trust = pm::lan::Trust::Revoked;
+            peer.outbound.vfs = pm::lan::VfsGrant::Off;
+            peer.outbound.audio = "off";
+            peer.outbound.video = "off";
+            peer.outbound.chat = "off";
+            peer.outbound.tools = "off";
+            peer.outbound.networks.clear();
+        }
+        if (!store.write(impl.fingerprint, peers, err))
+            return false;
+        for (const auto& peer : peers)
+            pm::node::sessions_cancel(peer.id, "");
+        mtime = fs::last_write_time(impl.devices_path, ec);
+    } else if (identity.empty() && exists) {
+        if (!store.write(impl.fingerprint, peers, err))
             return false;
         mtime = fs::last_write_time(impl.devices_path, ec);
-    } else if (file.identity.empty() && exists) {
-        file.identity = impl.fingerprint;
     }
-    impl.devices = std::move(file.devices);
+    impl.devices = std::move(peers);
     impl.devices_mtime = mtime;
     impl.devices_loaded = true;
     impl.devices_saved = std::chrono::steady_clock::now();
@@ -1181,10 +1159,8 @@ bool reload_devices_unlocked(LanServiceImpl& impl, std::string& err)
 
 bool store_devices_unlocked(LanServiceImpl& impl, std::string& err)
 {
-    DeviceFile file;
-    file.identity = impl.fingerprint;
-    file.devices = impl.devices;
-    if (!save_device_file(impl.devices_path, file, err))
+    pm::lan::PairStore store(impl.devices_path, static_cast<std::size_t>(k_max_devices));
+    if (!store.write(impl.fingerprint, impl.devices, err))
         return false;
     std::error_code ec;
     impl.devices_mtime = fs::last_write_time(impl.devices_path, ec);
@@ -1752,7 +1728,7 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
                     err = "could not assign a device id";
                     return PairError::Rejected;
                 }
-                id = "dev-" + to_hex(raw, sizeof(raw));
+                id = "dev-" + media::strutil::to_hex(raw, sizeof(raw));
             }
             bool replaced = false;
             for (const auto& d : impl_->devices) {
@@ -1774,20 +1750,29 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
                 err = "could not store the device token";
                 return PairError::Rejected;
             }
-            StoredDevice device;
+            pm::lan::Peer device;
             device.id = id;
             device.name = clean_text(device_name, 80);
             if (device.name.empty())
                 device.name = "Android";
             device.token_sha256 = hash;
-            device.scopes = granted;
+            device.trust = pm::lan::Trust::Paired;
             device.created = iso_now();
             device.last_seen = device.created;
-            device.revoked = false;
+            for (const auto& scope : granted) {
+                if (!pm::lan::grant_set_scope(device.outbound, scope)) {
+                    err = "phone requested scopes the desktop did not offer";
+                    return PairError::Rejected;
+                }
+            }
             bool updated = false;
             for (auto& d : impl_->devices) {
                 if (d.id == id) {
                     device.created = d.created.empty() ? device.created : d.created;
+                    device.tls_fp = d.tls_fp;
+                    device.peer_fp = d.peer_fp;
+                    device.outbound.networks = d.outbound.networks;
+                    device.outbound.revision = d.outbound.revision;
                     d = device;
                     updated = true;
                     break;
@@ -1800,6 +1785,7 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
                 err = save_err.empty() ? "could not save the paired device" : save_err;
                 return PairError::Rejected;
             }
+            pm::node::sessions_cancel(id, "");
             impl_->ticket.open = false;
             impl_->ticket.secret.clear();
             delete_qr_image(*impl_);
@@ -1833,7 +1819,7 @@ bool Service::authorize(const std::string& token, DeviceAuth& out)
     if (!reload_devices_unlocked(*impl_, err))
         return false;
     for (auto& d : impl_->devices) {
-        if (d.revoked || !constant_time_equal(hash, d.token_sha256))
+        if (d.trust != pm::lan::Trust::Paired || !constant_time_equal(hash, d.token_sha256))
             continue;
         d.last_seen = iso_now();
         const auto now = std::chrono::steady_clock::now();
@@ -1843,7 +1829,7 @@ bool Service::authorize(const std::string& token, DeviceAuth& out)
         }
         out.id = d.id;
         out.name = d.name;
-        out.scopes = d.scopes;
+        out.scopes = pm::lan::grant_scopes(d.outbound);
         return true;
     }
     return false;
@@ -1862,10 +1848,10 @@ std::vector<DeviceInfo> Service::devices()
         DeviceInfo info;
         info.id = d.id;
         info.name = d.name;
-        info.scopes = d.scopes;
+        info.scopes = pm::lan::grant_scopes(d.outbound);
         info.created = d.created;
         info.last_seen = d.last_seen;
-        info.revoked = d.revoked;
+        info.revoked = d.trust != pm::lan::Trust::Paired;
         out.push_back(std::move(info));
     }
     return out;
@@ -1885,24 +1871,31 @@ bool list_paired_devices(std::string& text, std::string& err)
     const fs::path dir = config_lan_dir(err);
     if (dir.empty())
         return false;
-    DeviceFile file;
-    if (!load_device_file(dir / "devices.json", file, err))
-        return false;
-    if (file.devices.empty()) {
+    const fs::path path = dir / "devices.json";
+    std::string identity;
+    std::vector<pm::lan::Peer> peers;
+    pm::lan::PairStore store(path, static_cast<std::size_t>(k_max_devices));
+    if (!store.load_identity(identity, peers, err)) {
+        if (err != "pair file uses ticket scopes" || !import_ticket_file(path, err) ||
+            !store.load_identity(identity, peers, err))
+            return false;
+    }
+    if (peers.empty()) {
         text = "no paired devices\n";
         return true;
     }
-    for (const auto& d : file.devices) {
-        text += d.revoked ? "revoked" : "active";
+    for (const auto& d : peers) {
+        text += d.trust == pm::lan::Trust::Paired ? "active" : "revoked";
         text += "\t";
         text += d.id;
         text += "\t";
         text += d.name;
         text += "\t";
-        for (size_t i = 0; i < d.scopes.size(); ++i) {
+        const auto scopes = pm::lan::grant_scopes(d.outbound);
+        for (size_t i = 0; i < scopes.size(); ++i) {
             if (i)
                 text += ",";
-            text += d.scopes[i];
+            text += scopes[i];
         }
         text += "\t";
         text += d.created;
@@ -1921,22 +1914,18 @@ bool revoke_paired_device(const std::string& id, std::string& err)
     if (dir.empty())
         return false;
     const fs::path path = dir / "devices.json";
-    DeviceFile file;
-    if (!load_device_file(path, file, err))
-        return false;
-    bool found = false;
-    for (auto& d : file.devices) {
-        if (d.id == id) {
-            d.revoked = true;
-            found = true;
-        }
+    pm::lan::PairStore store(path, static_cast<std::size_t>(k_max_devices));
+    std::string identity;
+    std::vector<pm::lan::Peer> peers;
+    if (!store.load_identity(identity, peers, err)) {
+        if (err != "pair file uses ticket scopes" || !import_ticket_file(path, err))
+            return false;
     }
-    if (!found) {
-        err = "no paired device with that id";
+    if (!store.revoke(id, err)) {
+        if (err.empty())
+            err = "no paired device with that id";
         return false;
     }
-    if (!save_device_file(path, file, err))
-        return false;
     logger::info("lan pair: revoked " + id);
     return true;
 }

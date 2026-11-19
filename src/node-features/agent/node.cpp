@@ -7,6 +7,7 @@
 
 #include "pm/node/desktop_gate.hpp"
 #include "pm/node/desktop_run.hpp"
+#include "pm/server/shared_folder.hpp"
 
 namespace media_cli {
 namespace node_detail {
@@ -18,17 +19,20 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
         pm::server::ListenOptions gate;
         gate.serve_api_key = opt.serve_api_key;
         gate.features = opt.features;
+        gate.serve_capabilities = {"files", "audio", "video", "chat", "tools"};
         return desktop_authorize(gate, req, res);
     };
 
+    const auto shared_roots = [] { return pm::server::shared_folder_roots(); };
     LlmVfsHost vfs_host;
     vfs_host.authority = "desktop";
-    vfs_host.roots = [] { return pm::node::bookmark_vfs_roots(); };
+    vfs_host.roots = shared_roots;
     vfs_host.authorize =
         [&opt](const httplib::Request& req, httplib::Response& res, LlmVfsAccess& access) {
             pm::server::ListenOptions gate;
             gate.serve_api_key = opt.serve_api_key;
             gate.features = opt.features;
+            gate.serve_capabilities = {"files", "audio", "video", "chat", "tools"};
             return desktop_authorize_vfs(gate, req, res, access);
         };
     register_llm_vfs_routes(svr, std::move(vfs_host));
@@ -100,7 +104,7 @@ void register_routes(httplib::Server& svr, const AgentServerOptions& opt, Inflig
     });
     register_host_routes(svr, require_v1_auth);
     register_llm_routes(svr, opt, gate, require_v1_auth);
-    register_chat_routes(svr, require_v1_auth);
+    register_chat_routes(svr, require_v1_auth, shared_roots);
     register_realtime_routes(svr, opt, require_v1_auth);
     register_video_routes(svr, require_v1_auth);
     register_audio_routes(svr, require_v1_auth);
