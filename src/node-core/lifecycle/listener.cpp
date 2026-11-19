@@ -2,19 +2,50 @@
 // host both start this file. It does not read the environment.
 
 #include "pm/node/peer_listener.hpp"
+#include "pm/node/listener_tls.hpp"
 
 #include "pm/server/features.hpp"
 #include "pm/server/secret.hpp"
 #include "pm/server/vfs.hpp"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <thread>
 #include <utility>
 
 namespace pm::node {
+
+/// The TLS front tells the loopback server which interface accepted the call.
+/// A header from anywhere else is ignored.
+std::string arrived_on(const httplib::Request& req)
+{
+    const bool loopback = req.remote_addr == "127.0.0.1" || req.remote_addr == "::1";
+    if (loopback) {
+        const std::string value = req.get_header_value("X-Tanit-Arrived");
+        if (!value.empty() && value.size() <= 64 && value.find(' ') == std::string::npos
+            && value.find(':') == std::string::npos)
+            return value;
+    }
+    return req.local_addr;
+}
+
 namespace {
 
 void send(httplib::Response& res, int status, const nlohmann::json& body)
@@ -46,7 +77,7 @@ struct Shared {
         const std::string mount = req.get_param_value("mount");
         if (!mount.empty())
             line += " mount=" + mount;
-        line += " from=" + req.remote_addr + " on=" + req.local_addr;
+        line += " from=" + req.remote_addr + " on=" + arrived_on(req);
         return line;
     }
 
@@ -62,25 +93,101 @@ struct Shared {
             return false;
         }
         peer = access.peer;
-        if (!pm::lan::network_granted(peer.outbound, req.local_addr)) {
+        if (!pm::lan::network_granted(peer.outbound, arrived_on(req))) {
             note(true, where(req) + " deny network peer=" + peer.id);
             nlohmann::json body = refusal("ENETWORK", "This network is not granted to this device.");
             body["revision"] = peer.outbound.revision;
             send(res, 403, body);
             return false;
         }
+        note(false, where(req) + " ok peer=" + peer.id);
         return true;
     }
 };
 
 } // namespace
 
+int reserve_loopback_port()
+{
+#if defined(_WIN32)
+    WSADATA wsa{};
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    SOCKET fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd == INVALID_SOCKET)
+        return 0;
+#else
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return 0;
+#endif
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    int port = 0;
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0) {
+#if defined(_WIN32)
+        int len = sizeof addr;
+#else
+        socklen_t len = sizeof addr;
+#endif
+        if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0)
+            port = ntohs(addr.sin_port);
+    }
+#if defined(_WIN32)
+    closesocket(fd);
+#else
+    close(fd);
+#endif
+    return port;
+}
+
 struct PeerListener::Impl {
     mutable std::mutex mu;
     std::shared_ptr<httplib::Server> server;
     std::thread thread;
+    std::thread watch;
+    std::atomic<bool> watch_stop{false};
+    PhoneTls* tls = nullptr;
+    std::string pin;
     int port = 0;
 };
+
+std::vector<std::string> granted_addresses(const PeerListenerHost& host, const pm::lan::PairStore& store)
+{
+    std::vector<LocalNetwork> nets;
+    if (host.networks)
+        nets = host.networks();
+    else if (!host.bind_host.empty() && host.bind_host != "0.0.0.0") {
+        LocalNetwork one;
+        one.address = host.bind_host;
+        one.kind = "local";
+        one.name = "test";
+        nets.push_back(std::move(one));
+    }
+    std::vector<pm::lan::Peer> rows;
+    std::string err;
+    if (!store.load(rows, err))
+        return {};
+    std::vector<std::string> out;
+    for (const auto& net : nets) {
+        if (net.address.empty() || net.address == "0.0.0.0")
+            continue;
+        bool granted = false;
+        for (const auto& row : rows) {
+            if (row.trust == pm::lan::Trust::Paired && pm::lan::network_granted(row.outbound, net.address))
+                granted = true;
+        }
+        if (!granted)
+            continue;
+        bool seen = false;
+        for (const auto& have : out)
+            seen = seen || have == net.address;
+        if (!seen)
+            out.push_back(net.address);
+    }
+    return out;
+}
 
 PeerListener::PeerListener() : impl_(std::make_unique<Impl>()) {}
 
@@ -101,16 +208,31 @@ int PeerListener::port() const
     return impl_->port;
 }
 
+std::string PeerListener::pin() const
+{
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    return impl_->pin;
+}
+
 void PeerListener::stop()
 {
+    impl_->watch_stop.store(true);
     std::shared_ptr<httplib::Server> server;
     std::thread thread;
+    std::thread watch;
+    PhoneTls* tls = nullptr;
     {
         std::lock_guard<std::mutex> lock(impl_->mu);
+        watch = std::move(impl_->watch);
+        tls = impl_->tls;
+        impl_->tls = nullptr;
         server = std::move(impl_->server);
         thread = std::move(impl_->thread);
         impl_->port = 0;
     }
+    if (watch.joinable())
+        watch.join();
+    phone_tls_close(tls);
     if (server)
         server->stop();
     if (thread.joinable())
@@ -142,7 +264,7 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
     server->set_pre_routing_handler([shared](const httplib::Request& req, httplib::Response& res) {
         if (shared->host.enter)
             shared->host.enter();
-        if (!shared->store.any_peer_on(req.local_addr)) {
+        if (!shared->store.any_peer_on(arrived_on(req))) {
             shared->note(true, shared->where(req) + " deny network");
             send(res, 403, refusal("ENETWORK", "This network is not granted."));
             return httplib::Server::HandlerResponse::Handled;
@@ -160,7 +282,6 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
             {"ok", true},
             {"role", shared->host.role},
             {"vfs", true},
-            {"authority", shared->host.authority},
         });
     });
 
@@ -184,6 +305,87 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
                 {"tools", peer.outbound.tools},
             }},
         });
+    });
+
+    // A paired peer tells this device where that peer listens. The row is the
+    // caller's pair id. The token in the body is what this device sends later,
+    // and it is wrapped before it is stored.
+    server->Post("/v1/lan/phone-vfs", [shared](const httplib::Request& req, httplib::Response& res) {
+        pm::lan::Peer peer;
+        if (!shared->admit(req, res, peer))
+            return;
+        if (peer.outbound.vfs == pm::lan::VfsGrant::Off) {
+            shared->note(true, shared->where(req) + " deny grant peer=" + peer.id);
+            nlohmann::json body = refusal("EGRANT", "Folder access is off for this device.");
+            body["revision"] = peer.outbound.revision;
+            send(res, 403, body);
+            return;
+        }
+        if (req.body.size() > 16u * 1024u) {
+            send(res, 413, refusal("EBODY", "The announce is too large."));
+            return;
+        }
+        const nlohmann::json doc = nlohmann::json::parse(req.body.empty() ? "{}" : req.body, nullptr, false);
+        if (!doc.is_object()) {
+            send(res, 400, refusal("EBODY", "The announce is not valid."));
+            return;
+        }
+        const std::string authority = doc.contains("authority") && doc["authority"].is_string()
+            ? doc["authority"].get<std::string>()
+            : std::string{};
+        bool authority_ok = authority.size() >= 7 && authority.size() <= 64 && authority.rfind("phone-", 0) == 0;
+        for (unsigned char c : authority) {
+            const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+            if (!ok)
+                authority_ok = false;
+        }
+        if (!authority_ok) {
+            send(res, 400, refusal("EBODY", "The phone name is not valid."));
+            return;
+        }
+        std::vector<std::string> urls;
+        if (doc.contains("urls") && doc["urls"].is_array()) {
+            for (const auto& url : doc["urls"]) {
+                if (!url.is_string() || urls.size() >= 8) {
+                    send(res, 400, refusal("EBODY", "A peer address is not usable."));
+                    return;
+                }
+                urls.push_back(url.get<std::string>());
+            }
+        }
+        const std::string tls_fp = doc.contains("tls_fp") && doc["tls_fp"].is_string()
+            ? doc["tls_fp"].get<std::string>()
+            : std::string{};
+        const std::string name = doc.contains("name") && doc["name"].is_string()
+            ? doc["name"].get<std::string>()
+            : std::string{};
+        const std::string token = doc.contains("token") && doc["token"].is_string()
+            ? doc["token"].get<std::string>()
+            : std::string{};
+        if (urls.empty()) {
+            send(res, 200, {{"ok", true}, {"authority", authority}, {"token", "missing"}});
+            return;
+        }
+        std::string sealed;
+        std::string err;
+        if (!token.empty()) {
+            if (!shared->host.seal_token || !shared->host.seal_token(token, sealed, err)) {
+                shared->note(true, shared->where(req) + " deny token peer=" + peer.id);
+                send(res, 400, refusal("ETOKEN", err.empty() ? "This device cannot store a peer token." : err));
+                return;
+            }
+        }
+        pm::lan::Peer stored;
+        if (!shared->store.set_dial(peer.id, name, urls, tls_fp, sealed, stored, err)) {
+            shared->note(true, shared->where(req) + " deny store peer=" + peer.id);
+            send(res, 400, refusal("EBODY", err.empty() ? "The announce is not valid." : err));
+            return;
+        }
+        shared->note(false, shared->where(req) + " stored peer=" + peer.id
+                                + " token=" + (stored.dial_token.empty() ? "missing" : "held"));
+        send(res, 200, {{"ok", true},
+                        {"authority", authority},
+                        {"token", stored.dial_token.empty() ? "missing" : "held"}});
     });
 
     media_cli::LlmVfsHost vfs;
@@ -226,24 +428,71 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
     };
     media_cli::register_llm_vfs_routes(*server, std::move(vfs));
 
-    int bound = 0;
-    for (int port = shared->host.port_first; port <= shared->host.port_last; ++port) {
-        if (server->bind_to_port(shared->host.bind_host, port)) {
-            bound = port;
-            break;
-        }
+    int backend = 0;
+    for (int attempt = 0; attempt < 8 && backend == 0; ++attempt) {
+        const int candidate = reserve_loopback_port();
+        if (candidate > 0 && server->bind_to_port("127.0.0.1", candidate))
+            backend = candidate;
     }
-    if (bound == 0) {
-        err = "could not bind a port for shared folders";
+    if (backend == 0) {
+        err = "could not bind the phone listener";
         return false;
     }
+    auto http = std::thread([server] { (void)server->listen_after_bind(); });
+    const int announced = shared->host.port_first == shared->host.port_last ? shared->host.port_first : 0;
+    std::string pin;
+    PhoneTls* tls = phone_tls_open(shared->host.pair_file, announced == 0 ? shared->host.port_first : announced,
+                                   backend, pin, err);
+    if (!tls && announced == 0) {
+        for (int port = shared->host.port_first + 1; port <= shared->host.port_last && !tls; ++port)
+            tls = phone_tls_open(shared->host.pair_file, port, backend, pin, err);
+    }
+    if (!tls) {
+        server->stop();
+        if (http.joinable())
+            http.join();
+        if (err.empty())
+            err = "could not prepare the phone listener";
+        return false;
+    }
+    const int chosen = announced == 0 ? shared->host.port_first : announced;
     {
         std::lock_guard<std::mutex> lock(impl_->mu);
         impl_->server = server;
-        impl_->port = bound;
-        impl_->thread = std::thread([server] { (void)server->listen_after_bind(); });
+        impl_->thread = std::move(http);
+        impl_->tls = tls;
+        impl_->pin = pin;
+        impl_->port = chosen;
+        impl_->watch_stop.store(false);
+        impl_->watch = std::thread([this, shared, tls] {
+            std::string applied;
+            while (!impl_->watch_stop.load()) {
+                const std::vector<std::string> addresses = granted_addresses(shared->host, shared->store);
+                std::string now;
+                for (const auto& address : addresses)
+                    now += address + " ";
+                if (now != applied) {
+                    std::string bind_err;
+                    if (phone_tls_set_addresses(tls, addresses, bind_err)) {
+                        applied = now;
+                        shared->note(false, std::string("[phone-vfs] listen")
+                                                + (addresses.empty() ? " none" : " " + now)
+                                                + "port=" + std::to_string(impl_->port));
+                    } else {
+                        if (!bind_err.empty())
+                            shared->note(true, "[phone-vfs] " + bind_err);
+                        if (applied.empty() && impl_->port < shared->host.port_last) {
+                            ++impl_->port;
+                            phone_tls_use_port(tls, impl_->port);
+                        }
+                    }
+                }
+                for (int i = 0; i < 4 && !impl_->watch_stop.load(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        });
     }
-    shared->note(false, "[phone-vfs] listen " + shared->host.bind_host + ":" + std::to_string(bound)
+    shared->note(false, "[phone-vfs] ready " + std::to_string(chosen)
                             + " authority=" + shared->host.authority);
     return true;
 }
@@ -289,10 +538,20 @@ std::string peer_state_json(const pm::lan::PairStore& store, const std::string& 
 
 bool peer_announce_json(const pm::lan::PairStore& store, const std::string& peer_id,
                         const std::string& authority, const std::string& name, int port,
-                        const std::vector<LocalNetwork>& networks, bool rotate, std::string& json,
-                        std::string& err)
+                        const std::string& tls_fp, const std::vector<LocalNetwork>& networks, bool rotate,
+                        std::string& json, std::string& err)
 {
     json.clear();
+    bool pin_ok = tls_fp.size() == 64;
+    for (unsigned char c : tls_fp) {
+        const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!hex)
+            pin_ok = false;
+    }
+    if (!pin_ok) {
+        err = "this device has no certificate pin";
+        return false;
+    }
     pm::lan::Peer peer;
     if (!store.find(peer_id, peer, err))
         return false;
@@ -307,13 +566,14 @@ bool peer_announce_json(const pm::lan::PairStore& store, const std::string& peer
                 break;
             if (!pm::lan::network_granted(peer.outbound, net.address))
                 continue;
-            urls.push_back("http://" + net.address + ":" + std::to_string(port));
+            urls.push_back("https://" + net.address + ":" + std::to_string(port));
         }
     }
     nlohmann::json body = {
         {"authority", authority},
         {"name", name},
         {"urls", std::move(urls)},
+        {"tls_fp", tls_fp},
     };
     if (rotate) {
         std::string token;

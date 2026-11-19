@@ -246,6 +246,34 @@ std::string clean_text(std::string_view in, size_t maxn)
     return media::strutil::trim(std::move(o));
 }
 
+bool pin_ok(const std::string& s)
+{
+    if (s.size() != 64)
+        return false;
+    for (unsigned char c : s) {
+        const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!hex)
+            return false;
+    }
+    return true;
+}
+
+std::wstring key_container_for_process()
+{
+    const char* extra = std::getenv("TANIT_LAN_KEY_ID");
+    if (!extra || !*extra)
+        return k_key_container;
+    std::wstring suffix;
+    for (const char* p = extra; *p && suffix.size() < 32; ++p) {
+        const unsigned char c = static_cast<unsigned char>(*p);
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+            suffix.push_back(static_cast<wchar_t>(c));
+    }
+    if (suffix.empty())
+        return k_key_container;
+    return std::wstring(k_key_container) + L"." + suffix;
+}
+
 bool device_id_ok(const std::string& s)
 {
     if (s.empty() || s.size() > 64)
@@ -815,6 +843,9 @@ struct LanServiceImpl {
     std::atomic<bool> stopping{false};
 
     std::string name;
+    /// Stable label. Written once into identity.json. Not the fingerprint.
+    std::string device_id;
+    std::wstring key_container;
     std::string fingerprint;
     std::string fingerprint_colon;
     std::string mdns_host;
@@ -894,14 +925,14 @@ void free_cert(LanServiceImpl& impl)
 bool open_or_create_key(LanServiceImpl& impl, bool& is_rsa, std::string& err)
 {
     is_rsa = true;
-    if (CryptAcquireContextW(&impl.csp, k_key_container, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, 0))
+    if (CryptAcquireContextW(&impl.csp, impl.key_container.c_str(), MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES, 0))
         return true;
     const DWORD open_err = GetLastError();
     if (open_err != NTE_BAD_KEYSET) {
         err = "could not open the LAN identity key (" + std::to_string(open_err) + ")";
         return false;
     }
-    if (!CryptAcquireContextW(&impl.csp, k_key_container, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES,
+    if (!CryptAcquireContextW(&impl.csp, impl.key_container.c_str(), MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES,
                               CRYPT_NEWKEYSET)) {
         err = "could not create the LAN identity key (" + std::to_string(GetLastError()) + ")";
         return false;
@@ -941,7 +972,7 @@ bool make_certificate(LanServiceImpl& impl, bool is_rsa, std::string& err)
     CERT_NAME_BLOB subject{name_cb, name.data()};
 
     CRYPT_KEY_PROV_INFO kpi{};
-    kpi.pwszContainerName = const_cast<LPWSTR>(k_key_container);
+    kpi.pwszContainerName = const_cast<LPWSTR>(impl.key_container.c_str());
     kpi.pwszProvName = const_cast<LPWSTR>(MS_ENH_RSA_AES_PROV_W);
     kpi.dwProvType = PROV_RSA_AES;
     kpi.dwKeySpec = AT_KEYEXCHANGE;
@@ -1424,6 +1455,7 @@ bool Service::prepare(const std::string& display_name, std::string& err)
     for (const auto& ip : impl_->ips)
         impl_->addresses.push_back(ip.text);
 
+    impl_->key_container = key_container_for_process();
     bool is_rsa = false;
     if (!open_or_create_key(*impl_, is_rsa, err) || !make_certificate(*impl_, is_rsa, err)) {
         free_cert(*impl_);
@@ -1432,18 +1464,38 @@ bool Service::prepare(const std::string& display_name, std::string& err)
 
     std::string previous;
     std::string previous_created;
+    std::string device_id;
     std::string text;
     if (read_text_file(impl_->identity_path, text)) {
         const auto j = media::json::try_parse(text);
         if (j.is_object()) {
             previous = j.value("fingerprint", std::string{});
             previous_created = j.value("created", std::string{});
+            device_id = j.value("id", std::string{});
         }
     }
+    bool id_ok = device_id.size() == 16;
+    for (unsigned char c : device_id) {
+        if (!id_ok)
+            break;
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            id_ok = false;
+    }
+    if (!id_ok) {
+        std::uint8_t raw[8];
+        if (!random_bytes(raw, sizeof(raw))) {
+            err = "could not assign a device id";
+            free_cert(*impl_);
+            return false;
+        }
+        device_id = media::strutil::to_hex(raw, sizeof(raw));
+    }
+    impl_->device_id = device_id;
     if (!previous.empty() && previous != impl_->fingerprint)
-        logger::warn("lan public key changed; phones must pair again");
+        logger::warn("lan public key changed; peers must pair again");
     const nlohmann::json id{
         {"v", 1},
+        {"id", device_id},
         {"fingerprint", impl_->fingerprint},
         {"created", previous == impl_->fingerprint && !previous_created.empty() ? previous_created : iso_now()},
     };
@@ -1576,6 +1628,7 @@ PublicInfo Service::info() const
         return out;
     std::lock_guard lock(impl_->mu);
     out.name = impl_->name;
+    out.id = impl_->device_id;
     out.fingerprint = impl_->fingerprint;
     out.fingerprint_colon = impl_->fingerprint_colon;
     out.tls_port = impl_->tls_port;
@@ -1677,8 +1730,8 @@ std::string Service::reveal_qr(const PairingTicket& ticket)
 
 PairError Service::complete_pairing(const std::string& secret, const std::string& device_id,
                                     const std::string& device_name,
-                                    const std::vector<std::string>& requested_scopes, PairGrant& out,
-                                    std::string& err)
+                                    const std::vector<std::string>& requested_scopes,
+                                    const std::string& peer_tls_fp, PairGrant& out, std::string& err)
 {
     err.clear();
     out = {};
@@ -1711,9 +1764,13 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
                 impl_->ticket.locked_until = now + std::chrono::seconds(30);
             mismatch = true;
         } else {
+            if (!peer_tls_fp.empty() && !pin_ok(peer_tls_fp)) {
+                err = "the peer certificate pin is not valid";
+                return PairError::Rejected;
+            }
             const auto granted = scope_intersection(impl_->ticket.scopes, requested_scopes);
             if (granted.empty()) {
-                err = "phone requested scopes the desktop did not offer";
+                err = "the peer requested scopes this device did not offer";
                 return PairError::Rejected;
             }
             std::string load_err;
@@ -1754,14 +1811,14 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
             device.id = id;
             device.name = clean_text(device_name, 80);
             if (device.name.empty())
-                device.name = "Android";
+                device.name = "peer";
             device.token_sha256 = hash;
             device.trust = pm::lan::Trust::Paired;
             device.created = iso_now();
             device.last_seen = device.created;
             for (const auto& scope : granted) {
                 if (!pm::lan::grant_set_scope(device.outbound, scope)) {
-                    err = "phone requested scopes the desktop did not offer";
+                    err = "the peer requested scopes this device did not offer";
                     return PairError::Rejected;
                 }
             }
@@ -1769,7 +1826,9 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
             for (auto& d : impl_->devices) {
                 if (d.id == id) {
                     device.created = d.created.empty() ? device.created : d.created;
-                    device.tls_fp = d.tls_fp;
+                    device.urls = d.urls;
+                    device.dial_token = d.dial_token;
+                    device.tls_fp = pin_ok(peer_tls_fp) ? peer_tls_fp : d.tls_fp;
                     device.peer_fp = d.peer_fp;
                     device.outbound.networks = d.outbound.networks;
                     device.outbound.revision = d.outbound.revision;
@@ -1778,8 +1837,11 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
                     break;
                 }
             }
-            if (!updated)
+            if (!updated) {
+                if (pin_ok(peer_tls_fp))
+                    device.tls_fp = peer_tls_fp;
                 impl_->devices.push_back(device);
+            }
             std::string save_err;
             if (!store_devices_unlocked(*impl_, save_err)) {
                 err = save_err.empty() ? "could not save the paired device" : save_err;
@@ -1791,6 +1853,7 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
             delete_qr_image(*impl_);
             out.token = token;
             out.device_id = id;
+            out.host_id = impl_->device_id;
             out.scopes = granted;
             out.fingerprint = impl_->fingerprint;
             logger::info("lan pair: granted " + id + " (" + device.name + ")");

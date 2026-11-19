@@ -34,7 +34,8 @@ bool Service::open_pairing(const std::vector<std::string>&, int, PairingTicket&,
 std::string Service::reveal_qr(const PairingTicket&) { return {}; }
 
 PairError Service::complete_pairing(const std::string&, const std::string&, const std::string&,
-                                    const std::vector<std::string>&, PairGrant&, std::string& err)
+                                    const std::vector<std::string>&, const std::string&, PairGrant&,
+                                    std::string& err)
 {
     err = k_unsupported;
     return PairError::Rejected;

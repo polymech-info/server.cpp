@@ -48,6 +48,11 @@ struct Peer {
     std::string peer_fp;
     /// SPKI SHA-256 of the peer's TLS listener, when this device dials it.
     std::string tls_fp;
+    /// `https://` addresses of that listener. At most eight. Empty until known.
+    std::vector<std::string> urls;
+    /// Wrapped token this device sends when it dials the peer. Opaque. Empty
+    /// until the peer has issued one. Not the hash in `token_sha256`.
+    std::string dial_token;
     /// SHA-256 of the `tn1_` token the peer presents. Empty until one is issued.
     std::string token_sha256;
     Trust trust = Trust::Paired;
@@ -106,6 +111,12 @@ public:
     /// An existing row keeps its trust and its grant.
     bool ensure_peer(std::string_view id, std::string_view name, std::string_view tls_fp,
                      Peer& out, std::string& err) const;
+
+    /// How this device dials that peer. A missing row is created with nothing
+    /// granted. An empty @p dial_token keeps the stored one. @p urls replaces
+    /// the stored list. A revoked row is refused.
+    bool set_dial(std::string_view id, std::string_view name, const std::vector<std::string>& urls,
+                  std::string_view tls_fp, std::string_view dial_token, Peer& out, std::string& err) const;
 
     /// Replaces the token hash and returns the plaintext once. The grant stays.
     bool issue_token(std::string_view id, std::string& token, std::string& err) const;

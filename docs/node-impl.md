@@ -23,7 +23,7 @@ The pair store and the bookmark file moved after the last link. No behavior chan
 
 Exit: vfs bytes move only after each side has checked the other's certificate pin, and a `/health` body that names the right authority receives no token.
 
-The phone listener is `httplib::Server` in `peer/listener.cpp`, bound to `0.0.0.0`, cleartext. `GET /health` returns `authority`. The desktop dialer is `route_for` in `src/vfs/phone_client.hpp`: it probes `/health` with an empty bearer and keeps the first URL whose `authority` equals the peer id. The desktop proxy is Schannel in `lan_win.cpp`, key container `TanitLanIdentity.rsa.v1`. The phone `PairStore` row already has `tls_fp`, documented as the SPKI SHA-256 of the listener this device dials. Nothing writes it. The legacy desktop paired-device row has no pin field yet.
+The phone listener terminates TLS in `listener_tls.cpp`. httplib binds 127.0.0.1. mbedtls serves the public port with an app-private P-256 certificate beside the pair file. `GET /health` returns `role` and does not return `authority`. Announce URLs are `https://` and the body carries `tls_fp`. The desktop dialer pins that SPKI and does not follow redirects. A missing or wrong pin sends no token. The desktop's own listener is still Schannel in `lan_win.cpp`, key container `TanitLanIdentity.rsa.v1`. The QR exchange does not yet carry both pins. The public listener is one socket per granted address, and a hop header is accepted only from the proxy on loopback.
 
 ### TLS decision gate
 
@@ -115,7 +115,7 @@ The in-process agent was made a `LocalAgent` principal in phase 2. It has explic
 | Commit | Does | Check |
 |---|---|---|
 | 6.1 | Delete the ticket-scope reader in `lan_win.cpp`. Delete any remaining open-loopback pass | A desktop with an old ticket file migrates or refuses with a clear error. `test:vfs-phone` |
-| 6.2 | Phone-to-phone. The phone gets a dial book, a `/v1/vfs` client, an announce target that is a peer, and a pairing screen where one phone shows the ticket. Same `PairStore` row, same `tls_fp` check. `lan/peers.json` stays the desktop book | One phone reads a folder the other is serving |
+| 6.2 | Desktop-to-desktop is on the pair row: `urls`, `tls_fp`, and a wrapped `dial_token`. `test:node-peer`. Two phone listeners dial the same way. An announce writes that row, and the desktop also keeps `lan/peers.json` for Places. `test:phone-peer` | One peer reads the other's `/v1/vfs` only after the pin matches |
 | 6.3 | Drop any `encryption.cpp` entry point `node-e2ee` gained and does not call. The library's tests keep the entry point | `node-e2ee` builds. The encryption test suite passes |
 
 ## Standing checks

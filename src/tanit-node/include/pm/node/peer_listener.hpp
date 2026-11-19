@@ -46,6 +46,14 @@ struct PeerListenerHost {
     std::function<void()> enter;
     /// One line per decision. Never a token and never file bytes.
     std::function<void(bool warn, const std::string& line)> log;
+    /// Wrap a `tn1_` token before it is stored on a pair row. Empty means this
+    /// host cannot keep a token a peer sends.
+    std::function<bool(const std::string& token, std::string& stored, std::string& err)> seal_token;
+    /// Interfaces this device can listen on. A public socket exists only for an
+    /// address that is inside some paired peer's granted network. Unset, with
+    /// a concrete `bind_host`, is the loopback test profile. `0.0.0.0` is never
+    /// a listening socket.
+    std::function<std::vector<LocalNetwork>()> networks;
     std::string bind_host = "0.0.0.0";
     int port_first = 8092;
     int port_last = 8100;
@@ -62,6 +70,8 @@ public:
     void stop();
     [[nodiscard]] bool listening() const;
     [[nodiscard]] int port() const;
+    /// SHA-256 of this listener's certificate, 64 hex digits. Empty until start().
+    [[nodiscard]] std::string pin() const;
 
 private:
     struct Impl;
@@ -72,13 +82,13 @@ private:
 [[nodiscard]] std::string peer_state_json(const pm::lan::PairStore& store, const std::string& authority,
                                           const std::vector<LocalNetwork>& networks);
 
-/// What this device posts to one peer: `{authority, name, urls}`. The urls are
-/// this device's addresses on the networks that peer was granted, so an
-/// ungranted network is never announced. `rotate` issues a new token and adds
-/// it as `token`. That is the only time the plaintext exists.
+/// What this device posts to one peer: `{authority, name, urls, tls_fp}`. The
+/// urls are `https://` on the networks that peer was granted. `tls_fp` is the
+/// SHA-256 of this listener's certificate. `rotate` issues a new token and
+/// adds it as `token`. That is the only time the plaintext exists.
 bool peer_announce_json(const pm::lan::PairStore& store, const std::string& peer_id,
                         const std::string& authority, const std::string& name, int port,
-                        const std::vector<LocalNetwork>& networks, bool rotate, std::string& json,
-                        std::string& err);
+                        const std::string& tls_fp, const std::vector<LocalNetwork>& networks,
+                        bool rotate, std::string& json, std::string& err);
 
 } // namespace pm::node

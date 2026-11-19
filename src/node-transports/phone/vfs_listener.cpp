@@ -3,11 +3,13 @@
 // knows: the profile, the device name, and the interfaces that are up.
 
 #include "pm/node/phone_vfs.hpp"
+#include "android/pm_android_secure_store.hpp"
 
 #include "core/settings_portable.hpp"
 #include "lan/pair_store.hpp"
 #include "logging/logger.h"
 #include "pm/node/node.hpp"
+#include "pm/node/listener_tls.hpp"
 #include "pm/node/peer_listener.hpp"
 #include "pm/server/shared_folder.hpp"
 #include "pm/server/vfs.hpp"
@@ -211,6 +213,14 @@ PhoneVfsInfo phone_vfs_sync(const std::string& profile_dir)
     host.roots = [] { return pm::server::shared_folder_roots(); };
     host.enter = [profile_dir] { media::portable_settings::set_profile_dir_override(profile_dir); };
     host.log = note;
+    host.seal_token = [](const std::string& token, std::string& stored, std::string& err) {
+        if (token.size() > 256 || token.rfind("tn1_", 0) != 0) {
+            err = "the peer token is not valid";
+            return false;
+        }
+        return pm::android::secure_encrypt(token, stored, err);
+    };
+    host.networks = [] { return local_networks(); };
     if (!g_listener.start(std::move(host), err)) {
         info.authority = authority;
         info.error = err.empty() ? "could not start the shared-folder listener" : err;
@@ -340,7 +350,10 @@ bool phone_lan_announce(const std::string& profile_dir, const std::string& id, c
         authority = load_or_create_authority(profile_dir, err);
     if (authority.empty())
         return false;
-    return peer_announce_json(pm::lan::PairStore(pair_file(profile_dir)), id, authority, name, port,
+    std::string pin;
+    if (!phone_tls_ensure(pair_file(profile_dir), pin, err))
+        return false;
+    return peer_announce_json(pm::lan::PairStore(pair_file(profile_dir)), id, authority, name, port, pin,
                               local_networks(), rotate, json, err);
 }
 

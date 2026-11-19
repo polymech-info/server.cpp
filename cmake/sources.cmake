@@ -11,6 +11,7 @@ function(pm_server_portable_sources out_var)
   set(${out_var}
     "${_root}/src/node-features/vfs/vfs.cpp"
     "${_root}/src/node-core/lifecycle/listener.cpp"
+    "${_root}/src/node-core/lifecycle/listener_tls.cpp"
     "${_root}/src/node-core/lifecycle/sessions.cpp"
     "${_root}/src/node-core/pair/pair_store.cpp"
     PARENT_SCOPE)

@@ -3,6 +3,8 @@
 #include "pm/node/lan_gate.hpp"
 #include "pm/server/features.hpp"
 
+#include "logging/logger.h"
+
 namespace media_cli {
 namespace node_detail {
 namespace {
@@ -66,7 +68,7 @@ bool desktop_authorize(const pm::server::ListenOptions& options, const httplib::
             if (!g_lan->authorize(secret, dev))
                 continue;
             if (!pm::server::route_grant_allows(grant, dev.scopes)) {
-                deny(res, 403, "this paired phone is not allowed to call that route",
+                deny(res, 403, "this peer is not allowed to call that route",
                      "invalid_request_error", "insufficient_scope");
                 return false;
             }
@@ -105,7 +107,7 @@ bool desktop_authorize_vfs(const pm::server::ListenOptions& options, const httpl
                 continue;
             if (!dev.has("files")) {
                 res.status = 403;
-                res.set_content(route_error("this paired phone is not allowed to call that route",
+                res.set_content(route_error("this peer is not allowed to call that route",
                                             "invalid_request_error", "insufficient_scope")
                                     .dump(),
                                 "application/json");
@@ -113,6 +115,7 @@ bool desktop_authorize_vfs(const pm::server::ListenOptions& options, const httpl
             }
             access.device_id = dev.id;
             access.files = true;
+            logger::info(std::string("[peer] vfs ") + dev.id);
             access.write = true;
             access.still_granted = [id = dev.id]() {
                 if (!g_lan)

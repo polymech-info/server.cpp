@@ -6,6 +6,7 @@
 #include "logging/logger.h"
 #include "string/string_utils.hpp"
 #include "core/settings_runtime.hpp"
+#include "lan/pair_store.hpp"
 #include "vfs/phone_peers.hpp"
 
 #include <filesystem>
@@ -37,6 +38,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
                             {"enabled", true},
                             {"protocol", lan::k_protocol_version},
                             {"name", info.name},
+                            {"id", info.id},
                             {"fingerprint", info.fingerprint},
                             {"tls_port", info.tls_port},
                             {"pairing", info.pairing_open},
@@ -164,9 +166,12 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
         }
         lan::PairGrant grant;
         std::string err;
+        const std::string peer_tls_fp = body.contains("tls_fp") && body["tls_fp"].is_string()
+            ? body["tls_fp"].get<std::string>()
+            : std::string{};
         const lan::PairError st = g_lan->complete_pairing(
             body.value("secret", std::string{}), body.value("device_id", std::string{}),
-            body.value("device_name", std::string{}), scopes, grant, err);
+            body.value("device_name", std::string{}), scopes, peer_tls_fp, grant, err);
         if (st != lan::PairError::Ok) {
             res.status = st == lan::PairError::BadSecret ? 401
                          : st == lan::PairError::Expired ? 410
@@ -184,6 +189,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
                             {"ok", true},
                             {"token", grant.token},
                             {"device_id", grant.device_id},
+                            {"host_id", grant.host_id},
                             {"fingerprint", grant.fingerprint},
                             {"scopes", grant.scopes},
                             {"protocol", lan::k_protocol_version},
@@ -243,8 +249,9 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
 
     // A paired phone announces its folder listener: its name, the addresses on
     // the networks it granted this computer, and (once) the token it issued
-    // for this computer. The row lands in `lan/peers.json`. The serve key and
-    // the caller's own bearer are never stored as the phone's token.
+    // for this computer. Places still reads `lan/peers.json`. The same address,
+    // pin, and wrapped token are stored on that phone's pair row. The serve
+    // key and the caller's own bearer are never stored as the phone's token.
     //
     // The reply says whether this computer holds a token for that phone. On
     // `missing` the phone issues a new one and announces again.
@@ -290,6 +297,13 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
         const std::string name = body.contains("name") && body["name"].is_string()
             ? body["name"].get<std::string>()
             : std::string{};
+        const std::string tls_fp = body.contains("tls_fp") && body["tls_fp"].is_string()
+            ? body["tls_fp"].get<std::string>()
+            : std::string{};
+        if (tls_fp.size() != 64) {
+            refuse(400, "the phone certificate pin is not valid");
+            return;
+        }
 
         // Who is announcing. A paired device is known by its desktop pair id.
         // A caller that used the serve key itself is the owner of this computer.
@@ -319,7 +333,23 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
         }
         bool holds_token = false;
         std::string err;
-        if (!pm::vfs::phone::store_peer(authority, name, urls, token, owner, holds_token, err)) {
+        if (owner != "serve-key" && !urls.empty()) {
+            std::string sealed;
+            if (!token.empty() && !pm::vfs::phone::seal_dial_token(token, sealed, err)) {
+                refuse(400, err.empty() ? "the phone token is not valid" : err);
+                return;
+            }
+            pm::lan::Peer dialed;
+            const auto devices = media::settings::get_config_dir() / "lan" / "devices.json";
+            if (!pm::lan::PairStore(devices, 64).set_dial(owner, name, urls, tls_fp, sealed, dialed, err)) {
+                const bool bad_input = err.find("not valid") != std::string::npos
+                                       || err.find("not usable") != std::string::npos
+                                       || err.find("revoked") != std::string::npos;
+                refuse(bad_input ? 400 : 500, err.empty() ? "could not store the phone" : err);
+                return;
+            }
+        }
+        if (!pm::vfs::phone::store_peer(authority, name, urls, token, tls_fp, owner, holds_token, err)) {
             const bool bad_input = err.find("not valid") != std::string::npos
                                    || err.find("not usable") != std::string::npos;
             refuse(bad_input ? 400 : 500, err.empty() ? "could not store the phone" : err);

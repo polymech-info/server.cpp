@@ -25,6 +25,10 @@ bool lan_hop_ok(const httplib::Request& req)
 {
     if (!g_lan || !lan_hop_present(req))
         return false;
+    // The proxy connects from this machine. A hop on any other socket is not
+    // the proxy, even when the secret matches.
+    if (!is_loopback_addr(req.remote_addr))
+        return false;
     return g_lan->hop_matches(req.get_header_value(lan::k_hop_header));
 }
 

@@ -73,6 +73,13 @@ target_link_libraries(pm-server-lib PUBLIC
 if(TARGET logger)
   target_link_libraries(pm-server-lib PUBLIC logger)
 endif()
+if(TARGET mbedtls)
+  target_compile_definitions(pm-server-lib PRIVATE PM_PHONE_TLS)
+  if(MBEDTLS_INCLUDE_DIR)
+    target_include_directories(pm-server-lib PRIVATE "${MBEDTLS_INCLUDE_DIR}")
+  endif()
+  target_link_libraries(pm-server-lib PUBLIC mbedcrypto mbedx509 mbedtls)
+endif()
 if(MSVC)
   target_compile_definitions(pm-server-lib PRIVATE
     _CRT_SECURE_NO_WARNINGS

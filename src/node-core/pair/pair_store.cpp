@@ -213,6 +213,63 @@ std::string text_of(const nlohmann::json& row, const char* key)
     return row.contains(key) && row[key].is_string() ? row[key].get<std::string>() : std::string{};
 }
 
+bool pin_hex(std::string_view text)
+{
+    if (text.size() != 64)
+        return false;
+    for (unsigned char c : text) {
+        const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!hex)
+            return false;
+    }
+    return true;
+}
+
+bool https_url(std::string_view url)
+{
+    if (url.size() > 200 || url.rfind("https://", 0) != 0)
+        return false;
+    for (unsigned char c : url) {
+        if (c <= 0x20 || c == 0x7f || c == '"' || c == '\\')
+            return false;
+    }
+    return true;
+}
+
+/// Empty, or a wrapped token. `w1:` is the desktop secret store. `aks:v1:` is
+/// the phone keystore. A `tn1_` token is plaintext and is never stored.
+bool wrapped_dial_token(std::string_view token)
+{
+    if (token.empty())
+        return true;
+    if (token.size() > 4096 || token.rfind("tn1_", 0) == 0)
+        return false;
+    return token.rfind("w1:", 0) == 0 || token.rfind("aks:v1:", 0) == 0;
+}
+
+bool read_urls(const nlohmann::json& row, std::vector<std::string>& urls, std::string& err)
+{
+    urls.clear();
+    if (!row.contains("urls"))
+        return true;
+    if (!row["urls"].is_array()) {
+        err = "the pair file is not valid";
+        return false;
+    }
+    for (const auto& item : row["urls"]) {
+        if (!item.is_string() || !https_url(item.get<std::string>())) {
+            err = "the pair file is not valid";
+            return false;
+        }
+        urls.push_back(item.get<std::string>());
+    }
+    if (urls.size() > 8) {
+        err = "the pair file is not valid";
+        return false;
+    }
+    return true;
+}
+
 bool read_doc(const std::filesystem::path& file, std::string& identity, std::vector<Peer>& out,
               std::string& err)
 {
@@ -259,6 +316,13 @@ bool read_doc(const std::filesystem::path& file, std::string& identity, std::vec
         peer.name = text_of(row, "name");
         peer.peer_fp = text_of(row, "peer_fp");
         peer.tls_fp = text_of(row, "tls_fp");
+        if (!read_urls(row, peer.urls, err))
+            return false;
+        peer.dial_token = text_of(row, "dial_token");
+        if (!wrapped_dial_token(peer.dial_token)) {
+            err = "the pair file is not valid";
+            return false;
+        }
         peer.token_sha256 = text_of(row, "token_sha256");
         if (!peer.token_sha256.empty() && peer.token_sha256.size() != 64) {
             err = "the pair file is not valid";
@@ -285,6 +349,8 @@ bool write_doc(const std::filesystem::path& file, std::string_view identity,
             {"name", peer.name},
             {"peer_fp", peer.peer_fp},
             {"tls_fp", peer.tls_fp},
+            {"urls", peer.urls},
+            {"dial_token", peer.dial_token},
             {"token_sha256", peer.token_sha256},
             {"trust", trust_name(peer.trust)},
             {"outbound", grant_json(peer.outbound)},
@@ -621,6 +687,74 @@ bool PairStore::ensure_peer(std::string_view id, std::string_view name, std::str
     return true;
 }
 
+bool PairStore::set_dial(std::string_view id, std::string_view name, const std::vector<std::string>& urls,
+                         std::string_view tls_fp, std::string_view dial_token, Peer& out,
+                         std::string& err) const
+{
+    if (!peer_id_valid(id)) {
+        err = "the device id is not valid";
+        return false;
+    }
+    if (!pin_hex(tls_fp)) {
+        err = "the peer certificate pin is not valid";
+        return false;
+    }
+    if (urls.empty() || urls.size() > 8) {
+        err = "a peer address is not usable";
+        return false;
+    }
+    for (const auto& url : urls) {
+        if (!https_url(url)) {
+            err = "a peer address is not usable";
+            return false;
+        }
+    }
+    if (!wrapped_dial_token(dial_token)) {
+        err = "the peer token is not valid";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(store_mutex());
+    std::vector<Peer> rows;
+    std::string identity;
+    if (!read_doc(file_, identity, rows, err))
+        return false;
+    const std::string now = media::utc_now_iso8601();
+    if (Peer* row = row_of(rows, id)) {
+        if (row->trust == Trust::Revoked) {
+            err = "this device is revoked";
+            return false;
+        }
+        const std::string label = media::strutil::clip_text(name, 80);
+        if (!label.empty())
+            row->name = label;
+        row->tls_fp = std::string(tls_fp);
+        row->urls.assign(urls.begin(), urls.end());
+        if (!dial_token.empty())
+            row->dial_token = std::string(dial_token);
+        row->last_seen = now;
+        out = *row;
+        return write_doc(file_, identity, rows, err);
+    }
+    if (rows.size() >= max_peers_) {
+        err = "this device is already paired with " + std::to_string(max_peers_) + " others";
+        return false;
+    }
+    Peer peer;
+    peer.id = std::string(id);
+    peer.name = media::strutil::clip_text(name, 80);
+    peer.tls_fp = std::string(tls_fp);
+    peer.urls.assign(urls.begin(), urls.end());
+    peer.dial_token = std::string(dial_token);
+    peer.trust = Trust::Paired;
+    peer.created = now;
+    peer.last_seen = now;
+    rows.push_back(peer);
+    if (!write_doc(file_, identity, rows, err))
+        return false;
+    out = std::move(peer);
+    return true;
+}
+
 bool PairStore::issue_token(std::string_view id, std::string& token, std::string& err) const
 {
     token.clear();
@@ -730,6 +864,9 @@ bool PairStore::repair(std::string_view id, Peer& out, std::string& err) const
     if (row->trust != Trust::Paired) {
         row->trust = Trust::Paired;
         row->token_sha256.clear();
+        row->dial_token.clear();
+        row->urls.clear();
+        row->tls_fp.clear();
         clear_caps(row->outbound);
         ++row->outbound.revision;
         row->last_seen = media::utc_now_iso8601();
