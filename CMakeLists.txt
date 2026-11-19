@@ -14,6 +14,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 set(PM_SERVER_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/sources.cmake")
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   include(FetchContent)
@@ -55,12 +56,14 @@ endif()
 
 # Portable on every image that serves /v1/vfs. One copy. Host targets link
 # this library. They do not compile these files again.
-add_library(pm-server-lib STATIC
-  src/base/src/vfs.cpp
-  src/tanit-node/peer/listener.cpp)
+pm_server_portable_sources(_pm_server_portable_sources)
+add_library(pm-server-lib STATIC ${_pm_server_portable_sources})
 target_include_directories(pm-server-lib PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/src/base/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/tanit-node/include")
+if(picosha2_SOURCE_DIR)
+  target_include_directories(pm-server-lib PRIVATE "${picosha2_SOURCE_DIR}")
+endif()
 target_compile_features(pm-server-lib PUBLIC cxx_std_20)
 target_link_libraries(pm-server-lib PUBLIC
   pm-commons-lib

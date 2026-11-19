@@ -6,8 +6,10 @@
 #include "pm_image_cmd_llm_agent_server.hpp"
 #include "json/json_utils.hpp"
 #include "pm/node/node.hpp"
+#include "pm/node/lan_gate.hpp"
 // httplib (winsock2) comes in here, ahead of any header that pulls windows.h.
 #include "pm/server/vfs.hpp"
+#include "pm/node/lan_routes.hpp"
 #include "pm/node/vfs_bookmarks.hpp"
 #include "lan/tanit_lan.hpp"
 
@@ -253,28 +255,6 @@ using media::llm::agent::cliopt::usage_fields;
 using media::llm::agent::cliopt::utc_now_iso;
 using media::llm::agent::cliopt::victoria_target;
 
-
-using AuthFn = std::function<bool(const httplib::Request&, httplib::Response&)>;
-
-inline bool is_audio_route(const std::string& path)
-{
-    const std::string prefix = "/v1/audio";
-    if (path == prefix)
-        return true;
-    return path.size() > prefix.size() && path.compare(0, prefix.size(), prefix) == 0
-           && path[prefix.size()] == '/';
-}
-
-/// Set while `llm agent --serve --lan` is running. Proxied phones are not loopback.
-extern lan::Service* g_lan;
-
-bool is_loopback_addr(std::string_view addr);
-bool lan_hop_present(const httplib::Request& req);
-bool lan_hop_ok(const httplib::Request& req);
-bool machine_local_request(const httplib::Request& req);
-std::vector<std::string> request_secrets(const httplib::Request& req);
-bool device_scope_ok(const lan::DeviceAuth& dev, const httplib::Request& req);
-
 void stop_llm_video_host();
 void stop_llm_audio_host();
 void install_chat_event_sources();
@@ -296,7 +276,7 @@ void register_realtime_routes(httplib::Server& svr, const AgentServerOptions& op
                               const AuthFn& require_v1_auth);
 void register_video_routes(httplib::Server& svr, const AuthFn& require_v1_auth);
 void register_audio_routes(httplib::Server& svr, const AuthFn& require_v1_auth);
-void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth);
+void register_log_routes(httplib::Server& svr, const AuthFn& require_v1_auth);
 
 } // namespace node_detail
 } // namespace media_cli

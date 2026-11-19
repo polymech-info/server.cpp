@@ -1,5 +1,5 @@
 // Desktop node: camera and screen routes.
-#include "node_internal.hpp"
+#include "../agent/node_internal.hpp"
 
 namespace media_cli {
 namespace node_detail {

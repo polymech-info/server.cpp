@@ -1,7 +1,11 @@
-// Desktop node: LAN pairing and phone log ingest.
-#include "node_internal.hpp"
+// Desktop node: LAN pairing.
+#include "pm/node/lan_routes.hpp"
+#include "pm/node/lan_gate.hpp"
 
-#include "pm/server/secret.hpp"
+#include "json/json_utils.hpp"
+#include "logging/logger.h"
+#include "string/string_utils.hpp"
+#include "core/settings_runtime.hpp"
 #include "vfs/phone_peers.hpp"
 
 #include <filesystem>
@@ -10,123 +14,14 @@
 namespace media_cli {
 namespace node_detail {
 
-bool forward_victoria_ndjson(const std::string& ndjson)
-{
-    const VictoriaTarget target = victoria_target();
-    if (!target.enabled || ndjson.empty())
-        return false;
-    httplib::Client cli(target.host, target.port);
-    cli.set_connection_timeout(0, 400000);
-    cli.set_read_timeout(0, 800000);
-    cli.set_write_timeout(0, 800000);
-    const auto res = cli.Post(
-        "/insert/jsonline?_stream_fields=source,device,build,session_id"
-        "&_msg_field=message&_time_field=_time",
-        ndjson, "application/stream+json");
-    return res && res->status >= 200 && res->status < 300;
-}
-
-void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
+void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
+                         const pm::server::ServerFeatures& features)
 {
     auto lan_off = [](httplib::Response& res) {
         res.status = 404;
-        res.set_content(openai_error("LAN discovery is off; restart with --lan").dump(),
+        res.set_content(route_error("LAN discovery is off; restart with --lan").dump(),
                         "application/json");
     };
-
-    svr.Post("/v1/logs", [require_v1_auth](const httplib::Request& req, httplib::Response& res) {
-        if (!require_v1_auth(req, res))
-            return;
-        if (req.body.size() > 512 * 1024) {
-            res.status = 413;
-            res.set_content(openai_error("log batch is too large").dump(), "application/json");
-            return;
-        }
-        const nlohmann::json body = media::json::try_parse(req.body.empty() ? "{}" : req.body);
-        if (!body.is_object() || !body.contains("lines") || !body["lines"].is_array()) {
-            res.status = 400;
-            res.set_content(openai_error("body must be {\"lines\":[...]}").dump(), "application/json");
-            return;
-        }
-        std::string device = "lan";
-        std::string device_name;
-        if (g_lan) {
-            for (const auto& secret : request_secrets(req)) {
-                lan::DeviceAuth dev;
-                if (!g_lan->authorize(secret, dev))
-                    continue;
-                if (!dev.id.empty())
-                    device = clip_text(dev.id, 64);
-                device_name = clip_text(dev.name, 80);
-                break;
-            }
-        }
-        auto text_field = [](const nlohmann::json& obj, const char* key) -> std::string {
-            if (!obj.contains(key) || !obj[key].is_string())
-                return {};
-            return obj[key].get<std::string>();
-        };
-        std::string session = text_field(body, "session_id");
-        if (session.empty())
-            session = "lan";
-        session = clip_text(std::move(session), 80);
-        const std::string model = clip_text(text_field(body, "device_model"), 80);
-        const std::string now = utc_now_iso();
-        std::string ndjson;
-        int accepted = 0;
-        for (const auto& line : body["lines"]) {
-            if (accepted >= 200)
-                break;
-            if (!line.is_object())
-                continue;
-            std::string message = text_field(line, "message");
-            if (message.empty())
-                continue;
-            message = clip_text(std::move(message), 8192);
-            std::string when = text_field(line, "_time");
-            if (when.empty())
-                when = text_field(line, "time");
-            if (when.size() < 19 || when.size() > 40 || when.find('T') == std::string::npos)
-                when = now;
-            std::string level = text_field(line, "level");
-            if (level.empty())
-                level = "info";
-            std::string component = text_field(line, "component");
-            if (component.empty())
-                component = "logcat";
-            nlohmann::json event{
-                {"_time", when},
-                {"source", "tanit-android"},
-                {"device", device},
-                {"device_kind", "phone"},
-                {"device_model", model},
-                {"device_name", device_name},
-                {"build", "android"},
-                {"session_id", session},
-                {"level", log_level_name(std::move(level))},
-                {"component", clip_text(std::move(component), 64)},
-                {"message", message},
-                {"via", "pair"},
-            };
-            ndjson += event.dump();
-            ndjson.push_back('\n');
-            ++accepted;
-        }
-        const bool stored = accepted > 0 && forward_victoria_ndjson(ndjson);
-        if (accepted > 0 && !stored) {
-            res.status = 503;
-            res.set_content(nlohmann::json{{"ok", false},
-                                           {"accepted", accepted},
-                                           {"stored", false},
-                                           {"error", "log store unavailable"}}
-                                .dump(),
-                            "application/json");
-            return;
-        }
-        res.status = 200;
-        res.set_content(nlohmann::json{{"ok", true}, {"accepted", accepted}, {"stored", stored}}.dump(),
-                        "application/json");
-    });
 
     svr.Get("/v1/lan/info", [](const httplib::Request&, httplib::Response& res) {
         if (!g_lan) {
@@ -152,8 +47,8 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
                         "application/json");
     });
 
-    svr.Post("/v1/lan/pair/begin", [require_v1_auth, lan_off](const httplib::Request& req,
-                                                             httplib::Response& res) {
+    svr.Post("/v1/lan/pair/begin", [require_v1_auth, lan_off, features](const httplib::Request& req,
+                                                                       httplib::Response& res) {
         if (!require_v1_auth(req, res))
             return;
         if (!g_lan) {
@@ -165,7 +60,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
             body = media::json::try_parse(req.body);
             if (!body.is_object()) {
                 res.status = 400;
-                res.set_content(openai_error("invalid JSON body").dump(), "application/json");
+                res.set_content(route_error("invalid JSON body").dump(), "application/json");
                 return;
             }
         }
@@ -175,7 +70,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
         if (body.contains("scopes")) {
             if (!body["scopes"].is_array() || body["scopes"].empty()) {
                 res.status = 400;
-                res.set_content(openai_error("scopes must list chat, files, tools, video, or audio").dump(),
+                res.set_content(route_error("scopes must list chat, files, tools, video, or audio").dump(),
                                 "application/json");
                 return;
             }
@@ -189,15 +84,27 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
         }
         if (!lan::parse_scopes(csv, scopes, scope_err)) {
             res.status = 400;
-            res.set_content(openai_error(scope_err).dump(), "application/json");
+            res.set_content(route_error(scope_err).dump(), "application/json");
             return;
         }
+        std::vector<std::string> offered;
+        for (const auto& scope : scopes) {
+            if (pm::server::scope_enabled(features, scope))
+                offered.push_back(scope);
+        }
+        if (offered.empty()) {
+            res.status = 400;
+            res.set_content(route_error("none of the pair scopes are enabled").dump(),
+                            "application/json");
+            return;
+        }
+        scopes = std::move(offered);
         int ttl = body.value("ttl_sec", 300);
         lan::PairingTicket ticket;
         std::string err;
         if (!g_lan->open_pairing(scopes, ttl, ticket, err)) {
             res.status = 500;
-            res.set_content(openai_error(err.empty() ? "could not open pairing" : err).dump(),
+            res.set_content(route_error(err.empty() ? "could not open pairing" : err).dump(),
                             "application/json");
             return;
         }
@@ -223,14 +130,14 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
     svr.Post("/v1/lan/pair", [lan_off](const httplib::Request& req, httplib::Response& res) {
         if (lan_hop_present(req) && !lan_hop_ok(req)) {
             res.status = 400;
-            res.set_content(openai_error("invalid LAN hop").dump(), "application/json");
+            res.set_content(route_error("invalid LAN hop").dump(), "application/json");
             return;
         }
         const bool via_tls = lan_hop_ok(req);
         if (!via_tls && !machine_local_request(req)) {
             res.status = 403;
             res.set_content(
-                openai_error("send the pairing secret over TLS after checking the fingerprint")
+                route_error("send the pairing secret over TLS after checking the fingerprint")
                     .dump(),
                 "application/json");
             return;
@@ -242,7 +149,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
         const nlohmann::json body = media::json::try_parse(req.body.empty() ? "{}" : req.body);
         if (!body.is_object()) {
             res.status = 400;
-            res.set_content(openai_error("invalid JSON body").dump(), "application/json");
+            res.set_content(route_error("invalid JSON body").dump(), "application/json");
             return;
         }
         std::vector<std::string> scopes;
@@ -268,7 +175,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
                                                            : 403;
             if (st == lan::PairError::Locked)
                 res.set_header("Retry-After", "30");
-            res.set_content(openai_error(err.empty() ? "pairing refused" : err).dump(),
+            res.set_content(route_error(err.empty() ? "pairing refused" : err).dump(),
                             "application/json");
             return;
         }
@@ -320,13 +227,13 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
         const nlohmann::json body = media::json::try_parse(req.body.empty() ? "{}" : req.body);
         if (!body.is_object()) {
             res.status = 400;
-            res.set_content(openai_error("invalid JSON body").dump(), "application/json");
+            res.set_content(route_error("invalid JSON body").dump(), "application/json");
             return;
         }
         std::string err;
         if (!g_lan->revoke(body.value("id", std::string{}), err)) {
             res.status = 404;
-            res.set_content(openai_error(err.empty() ? "device not found" : err).dump(),
+            res.set_content(route_error(err.empty() ? "device not found" : err).dump(),
                             "application/json");
             return;
         }
@@ -351,7 +258,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
         }
         auto refuse = [&res](int status, const std::string& text) {
             res.status = status;
-            res.set_content(openai_error(text).dump(), "application/json");
+            res.set_content(route_error(text).dump(), "application/json");
         };
         if (req.body.size() > 16 * 1024) {
             refuse(413, "phone announce is too large");
@@ -391,7 +298,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
         for (const auto& secret : request_secrets(req)) {
             lan::DeviceAuth dev;
             if (g_lan->authorize(secret, dev) && !dev.id.empty()) {
-                owner = clip_text(dev.id, 64);
+                owner = clip_route_text(dev.id, 64);
                 break;
             }
         }

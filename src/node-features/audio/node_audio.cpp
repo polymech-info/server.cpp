@@ -1,5 +1,5 @@
 // Desktop node: microphone, loopback, and playback routes.
-#include "node_internal.hpp"
+#include "../agent/node_internal.hpp"
 
 namespace media_cli {
 namespace node_detail {
