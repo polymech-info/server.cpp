@@ -1534,8 +1534,15 @@ bool Service::listen(const std::string& http_host, int http_port, int tls_port, 
         return true;
 
     std::string upstream = http_host;
-    if (upstream.empty() || upstream == "0.0.0.0" || upstream == "::" || upstream == "*")
-        upstream = "127.0.0.1";
+    if (upstream.empty() || upstream == "0.0.0.0" || upstream == "::" || upstream == "*") {
+        // 127.0.0.1 can belong to another process. A wildcard listen still
+        // receives a connection aimed at one of this machine's own addresses.
+        upstream.clear();
+        if (!impl_->ips.empty())
+            upstream = impl_->ips.front().text;
+        if (upstream.empty())
+            upstream = "127.0.0.1";
+    }
     if (ieq(upstream, "localhost"))
         upstream = "127.0.0.1";
 
@@ -1639,6 +1646,19 @@ PublicInfo Service::info() const
     return out;
 }
 
+bool Service::proxy_peer(const std::string& addr) const
+{
+    if (!impl_ || addr.empty())
+        return false;
+    std::lock_guard lock(impl_->mu);
+    if (addr == impl_->upstream_host)
+        return true;
+    for (const auto& ip : impl_->ips)
+        if (ip.text == addr)
+            return true;
+    return false;
+}
+
 bool Service::hop_matches(const std::string& presented) const
 {
     if (!impl_)
@@ -1695,7 +1715,7 @@ bool Service::open_pairing(const std::vector<std::string>& scopes, int ttl_sec, 
     return true;
 }
 
-std::string Service::reveal_qr(const PairingTicket& ticket)
+std::string Service::reveal_qr(const PairingTicket& ticket, bool open_window)
 {
     if (!impl_ || ticket.uri.empty() || !ticket.qr_error.empty())
         return {};
@@ -1719,7 +1739,8 @@ std::string Service::reveal_qr(const PairingTicket& ticket)
         impl_->qr_image = path_utf8;
     }
     const char* skip = std::getenv("TANIT_LAN_NO_QR_WINDOW");
-    if (!(skip && (std::string(skip) == "1" || ieq(skip, "true")))) {
+    const bool suppressed = skip && (std::string(skip) == "1" || ieq(skip, "true"));
+    if (open_window && !suppressed) {
         const INT_PTR opened = reinterpret_cast<INT_PTR>(
             ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
         if (opened <= 32)

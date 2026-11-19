@@ -6,14 +6,50 @@
 #include "pm/node/media_routes.hpp"
 
 #include "logging/logger.h"
+#include "settings/settings_runtime.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <ctime>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace pm::node {
 namespace {
+
+// Same rows the agent returns from GET /v1/models. The phone settings sheet
+// reads this list from whichever desktop it paired with.
+nlohmann::json preset_models_json()
+{
+    nlohmann::json data = nlohmann::json::array();
+    std::vector<media::runtime_settings::ChatProviderPreset> presets;
+    std::string err;
+    (void)media::runtime_settings::load_chat_provider_presets(presets, err);
+    const long created = static_cast<long>(std::time(nullptr));
+    if (presets.empty()) {
+        data.push_back({
+            {"id", "default"},
+            {"object", "model"},
+            {"created", created},
+            {"owned_by", "tanit"},
+        });
+    } else {
+        for (const auto& preset : presets) {
+            const std::string id = !preset.name.empty() ? preset.name
+                : (!preset.id.empty() ? preset.id : "preset");
+            data.push_back({
+                {"id", id},
+                {"object", "model"},
+                {"created", created},
+                {"owned_by", "tanit"},
+                {"tanit_preset_id", preset.id},
+                {"tanit_is_default", preset.is_default},
+            });
+        }
+    }
+    return nlohmann::json{{"object", "list"}, {"data", std::move(data)}};
+}
 
 void mount_node(httplib::Server& server, const pm::server::ListenOptions& options)
 {
@@ -44,6 +80,15 @@ void mount_node(httplib::Server& server, const pm::server::ListenOptions& option
         res.set_content(nlohmann::json{{"ok", true}, {"ready", true}}.dump(), "application/json");
     });
     media_cli::node_detail::register_lan_routes(server, require_v1_auth, options.features);
+    server.Get("/v1/models", [options](const httplib::Request& req, httplib::Response& res) {
+        // route_enabled hides this path while llm is off. The list is presets, not chat.
+        pm::server::ListenOptions gate = options;
+        gate.features.llm = true;
+        if (!media_cli::node_detail::desktop_authorize(gate, req, res))
+            return;
+        res.status = 200;
+        res.set_content(preset_models_json().dump(), "application/json");
+    });
     if (options.features.audio)
         media_cli::node_detail::register_audio_routes(server, require_v1_auth);
     if (options.features.video)

@@ -1,7 +1,7 @@
 #pragma once
 
 // Desktop LAN hop and bearer parsing. No agent include: a phone on the TLS
-// proxy is loopback at the TCP layer and is not a local caller.
+// proxy arrives from this machine and is not a local caller.
 
 #include "lan/tanit_lan.hpp"
 

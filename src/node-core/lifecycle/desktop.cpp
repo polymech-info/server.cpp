@@ -85,6 +85,12 @@ int run_desktop(const pm::server::ListenOptions& options, DesktopHooks hooks)
         if (!lan_service)
             return nlohmann::json{{"type", "error"}, {"error", "LAN pairing is off"}};
         std::vector<std::string> scopes = options.pair_scopes;
+        if (req.contains("scopes") && req["scopes"].is_string()) {
+            std::vector<std::string> asked;
+            std::string scope_err;
+            if (media_cli::lan::parse_scopes(req["scopes"].get<std::string>(), asked, scope_err))
+                scopes = std::move(asked);
+        }
         if (scopes.empty() && pm::server::scope_enabled(options.features, "files"))
             scopes.emplace_back("files");
         std::vector<std::string> offered;
@@ -100,7 +106,7 @@ int run_desktop(const pm::server::ListenOptions& options, DesktopHooks hooks)
             return nlohmann::json{{"type", "error"},
                                   {"error", err.empty() ? "could not open a ticket" : err}};
         }
-        ticket.image_path = lan_service->reveal_qr(ticket);
+        ticket.image_path = lan_service->reveal_qr(ticket, false);
         return nlohmann::json{{"type", "pair"},
                               {"ok", true},
                               {"uri", ticket.uri},
