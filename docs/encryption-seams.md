@@ -352,3 +352,241 @@ The phone image compiles this package's files by path, not as a library. The sam
 8. **Whether vfs bytes ride the channel.** tanit-mesh section 7 keeps folder bytes inside TLS on a LAN. The phone listener has no TLS, and that is a separate todo. `design.md` allows vfs copies on the LAN channel. If they do, that is `SecureChannel` with its own content-type label, not `TextSession`: text is capped at 12 KiB and labeled `text/plain`.
 9. **Threads.** `SecureChannel` and `TextSession` keep plain counters. The phone listener runs four workers. The session table needs one lock per session. Frame 0 has to arrive before any other frame on that channel. After it, 64 may arrive out of order.
 10. **Trust values.** `pm::room::Trust` has `Unknown`. `pm::lan::Trust` starts at `Verifying`. `ensure_peer` writes a new row as `paired` today, because there is no second step yet.
+
+---
+
+next
+
+I would keep **identity decentralized, device-based, and independent of external providers**. Then add an optional *person identity* above it, rather than making every node depend on a user account.
+
+Your current architecture is already close. The main thing to avoid is mixing four different concepts:
+
+1. **Identity** — who is this device or person?
+2. **Trust** — have I verified this identity?
+3. **Authorization** — what may this identity access, and until when?
+4. **Encryption** — who can actually decrypt the content?
+
+These should have separate lifecycles. In particular, **pairing must not implicitly authorize every future feature**, and losing a device should not mean losing your entire identity.
+
+## **1. Identity: device first, person second**
+
+Each node can operate independently. A person identity links devices when needed; it is not a central login server.
+
+### **Device identity — mandatory**
+
+Each installation gets an Ed25519 identity keypair, separate from its TLS certificate.
+
+- Private key: protected locally.
+- Public key: exchanged during pairing and pinned.
+- Device ID: derived from the public key (for example, a domain-separated hash).
+- Device name: human-readable and changeable.
+- TLS fingerprint: separate and independently rotatable.
+
+The **public key is the identity's cryptographic authority**, not an arbitrary device ID string.
+
+Your existing `Identity` and `PairStore` can support this, once the pair row stores the actual public key. The attached seam document confirms that the current fingerprint alone cannot reconstruct that key.&#x20;
+
+Eingefügtes Markdown(2).md
+
+
+
+I would preserve a separate stable *logical node identifier* if you want VFS paths and saved device references to survive key rotation. Otherwise, rotating the identity key necessarily changes a key-derived device ID.
+
+### **Person identity — optional**
+
+Introduce this only when you need multiple devices belonging to one person, shared conversations, or identity recovery.
+
+A person identity could be represented by a separate public key, with signed statements authorizing particular device keys. No email address, domain, cloud account, or external service is necessary.
+
+The person key should not be copied unprotected onto every device. It could live in a protected recovery store or be used only when enrolling and revoking devices.
+
+This gives you two useful relationships:
+
+- `device B is trusted by device A`
+- `device B is authorized to represent person X`
+
+Those are not necessarily equivalent.
+
+### **Where ZITADEL fits**
+
+ZITADEL belongs above this model, not underneath it.
+
+Use it later for cloud login, organizations, invitations, enterprise policy and OIDC integration. Its self-hosted and air-gapped deployments are supported, but that still makes it an operated identity service, not an intrinsic requirement of peer-to-peer trust.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://zitadel.com\&sz=32)
+
+ZITADEL Docs+1
+
+
+
+A node should remain capable of verifying a previously paired device without contacting ZITADEL.
+
+## **2. Lost devices, recovery and revocation**
+
+This is the part worth designing before implementing chat encryption.
+
+| Situation                                | Recommended behavior                                              |
+| ---------------------------------------- | ----------------------------------------------------------------- |
+| Phone lost, desktop available            | Revoke phone, enroll replacement, preserve person identity        |
+| Desktop lost, phone available            | Same operation in reverse                                         |
+| All devices lost, recovery key available | Restore person identity, enroll fresh device keys                 |
+| All devices and recovery lost            | Create a new identity; existing peers must verify it again        |
+| Device stolen while offline              | Revoke where possible; disconnected peers won't learn immediately |
+
+The last case is unavoidable in a genuinely decentralized system: **you cannot guarantee immediate global revocation without connectivity.**
+
+I would support three recovery paths, in this order:
+
+1. Another trusted device signs enrollment of the replacement.
+2. An optional, strongly encrypted offline recovery backup authorizes new devices.
+3. Manual re-pairing with a new identity when neither is available.
+
+Never restore a stolen device's private key to its replacement. Generate a fresh keypair.
+
+For optional person identity, recovery restores continuity of the person, not continuity of the compromised device or its old encrypted sessions. Recovery of old chat history is a separate backup problem.
+
+One implementation detail matters: your `Identity::from_seed()` currently needs private key material in process memory. Wrapping that seed using Windows DPAPI or Android Keystore protects it at rest, but does not make the key non-exportable during use. True non-exportable identity keys require platform signing operations behind an interface, rather than handing the key to libsodium.&#x20;
+
+Eingefügtes Markdown(2).md
+
+
+
+I would accept protected seed storage for the first version, with a narrow `IdentitySigner` interface that can support hardware-backed keys later.
+
+## **3. Grants and expiration**
+
+Keep your existing `route_enabled → route_grant → handler` gate. It's a good foundation.
+
+What is missing is a clean distinction between **persistent permissions and temporary credentials**.
+
+| Object            | Lifetime                                   | Revocation                             |
+| ----------------- | ------------------------------------------ | -------------------------------------- |
+| Device identity   | Until key retirement or compromise         | Revoke trusted binding                 |
+| Pair relationship | Persistent by default                      | Explicit unpair                        |
+| Pairing ticket    | Suggested 2–5 minutes, single-use          | Automatic expiration                   |
+| Device grant      | Persistent or until configured expiry      | Grant revision and revoke              |
+| Access token      | Short lease, renewable                     | Revoke/rotate and check current grant  |
+| Live stream       | Until close, expiry, or revoked permission | Immediate cancellation                 |
+| Chat membership   | Until removed                              | Remove member, update encryption state |
+
+### **Design the grant as a first-class record**
+
+Something close to:
+
+```
+struct Grant {
+    GrantId id;
+    DeviceKeyId subject;
+    Capability capability;
+
+    ResourceScope resources;
+    uint64_t revision;
+
+    TimePoint created_at;
+    Optional<TimePoint> expires_at;
+
+    bool revoked;
+};
+```
+
+The important properties:
+
+- `subject` is a cryptographic identity, not a display name or IP address.
+- `resources` can describe a shared folder, a set of paths, a particular device, or a conversation.
+- Missing `expires_at` means persistent permission, not infinite-lived credentials.
+- `revision` supports cancellation and prevents reuse of superseded authorization.
+- Narrowing a grant is as significant as revocation.
+
+**A token must never outlive the underlying permission.** More precisely, an unexpired token is still refused whenever the authoritative grant is expired, revoked, or narrower than the requested operation.
+
+Your current pair file is already the authoritative source for the direct node listener, so there is little reason to build a separate JWT authorization system for local calls. Short-lived bearer tokens are useful, but local grant validation remains decisive.
+
+For streams, check expiry at start and during operation, not only on initial HTTP authorization. Use monotonic deadlines while running; for persisted absolute expirations, account for wall-clock changes and offline clock uncertainty.
+
+### **One correction I would make now**
+
+Your attached proposal currently makes secure chat available to any paired row, without a separate chat grant.&#x20;
+
+Eingefügtes Markdown(2).md
+
+
+
+I would change that.
+
+Pairing means *I recognize you*. It shouldn't automatically mean *you may read my chats, files, camera, or microphone*.
+
+Add `messages` or `chat` as an independent capability, and separately enforce conversation membership. This also keeps device-to-device messaging distinct from your existing agent `/v1/chat` surface.
+
+## **4. Encryption: keep it above the node**
+
+I would not turn `pm-encryption-lib` into another universal network layer.
+
+Your node already has TLS, pinned peers, and route authorization. Keep those mechanisms operational independently of application-level E2EE.
+
+| Traffic                            | Recommended protection                                          |
+| ---------------------------------- | --------------------------------------------------------------- |
+| LAN discovery and pairing          | Existing pinned TLS and pairing proof                           |
+| VFS, audio, video                  | Existing TLS plus grants                                        |
+| Private peer chat                  | Optional E2EE, required for conversations configured as private |
+| Files stored by an untrusted relay | `FileOffer` encryption                                          |
+| Agent requests                     | TLS, optionally E2EE to the agent endpoint                      |
+
+The important distinction: when the agent decrypts a message to process it, **the agent is a trusted recipient**, not a blind relay.
+
+### **Signal versus your existing channel**
+
+I would use a ratcheting protocol for persistent private messaging.
+
+- **Signal-style Double Ratchet:** good for asynchronous, one-to-one conversations, including messages delivered after reconnect.
+- **Your&#x20;**`TextSession`**&#x20;/&#x20;**`SecureChannel`**:** potentially useful for authenticated, ephemeral live connections. It should not become a second competing persistent messaging protocol.
+- **MLS:** worth evaluating later if multi-device group conversations become important. It already specifies membership changes and cryptographic epochs.&#x20;
+
+  [image](https://www.google.com/s2/favicons?domain=https://www.rfc-editor.org\&sz=32)
+
+  RFC-Editor+1
+
+
+
+There is one practical issue with upstream `libsignal`: its current implementation is **AGPLv3**, and its maintainers explicitly say third-party integration is unsupported and the C/JNI bridge APIs may change. If that's the library you're using, verify license compatibility and binding stability before committing it to a distributed Tanit build.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://github.com\&sz=32)
+
+GitHub+1
+
+
+
+For Signal-style messaging, also remember that ratchet state must be persisted atomically and securely. A memory-only `SessionTable` is fine for your current live handshake proof of concept, but not sufficient for durable asynchronous chat.
+
+### **Expiration in encrypted conversations**
+
+Three different expiration mechanisms are needed:
+
+- **Access expiration:** a peer loses permission to send or retrieve new messages.
+- **Message expiration:** a queued message is dropped after its delivery deadline.
+- **Cryptographic retirement:** keys and sessions are advanced or retired after compromise, removal, or protocol-driven rekeying.
+
+These are not interchangeable.
+
+Removing someone from a conversation must stop authorization and update the encryption state for future messages. It cannot erase plaintext or old keys that the removed participant has already obtained.
+
+Likewise, a disappearing-message timer is a retention feature, not a guarantee that the recipient cannot keep the message.
+
+For optional E2EE, make encryption policy a conversation property, for example `transport_only` or `e2ee_required`. Never silently fall back to plaintext because a key is unavailable.
+
+## **5. Minimal next steps**
+
+I would implement in this order:
+
+1. **Device identity:** add Ed25519 public key, key ID, and identity storage to the existing pairing model. Preserve separate TLS pins.
+2. **Bind identity during existing pairing:** carry the identity public key in the authenticated ticket/QR exchange and verify the binding. Don't invent another user-facing pairing ceremony unless the existing proof is insufficient.
+3. **Grant lifecycle:** add optional expiry, explicit `messages` capability, revision checks, and live-session invalidation.
+4. **Lost-device operations:** revoke identity bindings, invalidate tokens, retire chat sessions, and propagate signed revocations where possible.
+5. **Optional secure messaging feature:** only then link `pm-encryption-lib` into the binary that actually offers secure chat.
+
+No ZITADEL dependency. No new network stack. No need to link encryption into `pm-server-lib`.
+
+**The main architectural decision:** use device public keys for authenticating nodes, optional person identities for continuity and recovery, local grants for authorization, and message-level cryptography for confidential conversations.
+
+That preserves your off-grid model while leaving a clean place for cloud identity, encrypted relays, and multi-device accounts later.
+
+

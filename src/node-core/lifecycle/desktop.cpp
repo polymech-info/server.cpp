@@ -107,12 +107,19 @@ int run_desktop(const pm::server::ListenOptions& options, DesktopHooks hooks)
                                   {"error", err.empty() ? "could not open a ticket" : err}};
         }
         ticket.image_path = lan_service->reveal_qr(ticket, false);
+        const media_cli::lan::PublicInfo pub = lan_service->info();
+        const std::string fingerprint = ticket.fingerprint_colon.empty()
+            ? ticket.fingerprint : ticket.fingerprint_colon;
         return nlohmann::json{{"type", "pair"},
                               {"ok", true},
                               {"uri", ticket.uri},
                               {"expires_at", ticket.expires_at},
                               {"scopes", ticket.scopes},
-                              {"image", ticket.image_path}};
+                              {"image", ticket.image_path},
+                              {"host", ticket.host},
+                              {"port", ticket.port},
+                              {"fingerprint", fingerprint},
+                              {"name", pub.name}};
     });
     if (hooks.attach_ipc)
         hooks.attach_ipc(ipc_server);
