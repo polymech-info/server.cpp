@@ -116,19 +116,17 @@ bool desktop_authorize_vfs(const pm::server::ListenOptions& options, const httpl
             access.device_id = dev.id;
             access.files = true;
             logger::info(std::string("[peer] vfs ") + dev.id);
-            access.write = true;
-            access.still_granted = [id = dev.id]() {
+            access.write = dev.write;
+            access.grant_revision = dev.revision;
+            access.still_granted = [id = dev.id, revision = dev.revision]() {
                 if (!g_lan)
                     return false;
                 for (const auto& info : g_lan->devices()) {
                     if (info.id != id)
                         continue;
-                    if (info.revoked)
+                    if (info.revoked || info.revision != revision)
                         return false;
-                    for (const auto& scope : info.scopes)
-                        if (scope == "files")
-                            return true;
-                    return false;
+                    return info.vfs == "write";
                 }
                 return false;
             };

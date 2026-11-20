@@ -14,6 +14,15 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace pm::node {
 namespace {
 
@@ -27,6 +36,35 @@ nlohmann::json payload_error(std::size_t limit)
                             {"type", "invalid_request_error"},
                             {"code", "agent_error"},
                             {"param", nullptr}}}};
+}
+
+// A leftover node or agent still registered on this HTTP port. Binding again
+// is allowed by SO_REUSEADDR, and the two hop secrets then answer 400 and 401.
+std::string listener_already_serving(int port)
+{
+#if defined(FEATURE_COMMAND_IPC_NEXT) && FEATURE_COMMAND_IPC_NEXT
+    const std::string suffix = ":" + std::to_string(port);
+#if defined(_WIN32)
+    const auto self = static_cast<std::int64_t>(::GetCurrentProcessId());
+#else
+    const auto self = static_cast<std::int64_t>(::getpid());
+#endif
+    for (const auto& inst : media::cmd_ipc::list_instances()) {
+        if (inst.pid == 0 || inst.pid == self)
+            continue;
+        if (inst.kind != media::cmd_ipc::ProcessKind::Node
+            && inst.kind != media::cmd_ipc::ProcessKind::LlmAgent)
+            continue;
+        if (inst.label.size() < suffix.size()
+            || inst.label.compare(inst.label.size() - suffix.size(), suffix.size(), suffix) != 0)
+            continue;
+        return std::string(media::cmd_ipc::kind_str(inst.kind)) + " pid "
+            + std::to_string(inst.pid);
+    }
+#else
+    (void)port;
+#endif
+    return {};
 }
 
 } // namespace
@@ -67,6 +105,13 @@ int run_desktop(const pm::server::ListenOptions& options, DesktopHooks hooks)
     };
     if (hooks.mount)
         hooks.mount(*svr);
+
+    if (const std::string occupied = listener_already_serving(options.port); !occupied.empty()) {
+        std::cerr << prefix << ": " << options.host << ":" << options.port
+                  << " is already served by " << occupied << "\n";
+        g_lan = nullptr;
+        return 1;
+    }
 
     if (!svr->bind_to_port(options.host, options.port)) {
         std::cerr << prefix << ": could not bind " << options.host << ":" << options.port << "\n";

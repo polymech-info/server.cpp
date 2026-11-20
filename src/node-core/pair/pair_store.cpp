@@ -826,6 +826,56 @@ bool PairStore::set_grant(std::string_view id, VfsGrant vfs, const std::vector<s
     return true;
 }
 
+bool PairStore::set_caps(std::string_view id, VfsGrant vfs, bool audio, bool video, bool chat,
+                         bool tools, Peer& out, std::string& err) const
+{
+    auto flag = [](bool on) { return on ? std::string("on") : std::string("off"); };
+    std::lock_guard<std::mutex> lock(store_mutex());
+    std::vector<Peer> rows;
+    std::string identity;
+    if (!read_doc(file_, identity, rows, err))
+        return false;
+    Peer* row = row_of(rows, id);
+    if (!row || row->trust != Trust::Paired) {
+        err = "this device is not paired";
+        return false;
+    }
+    const std::string audio_flag = flag(audio);
+    const std::string video_flag = flag(video);
+    const std::string chat_flag = flag(chat);
+    const std::string tools_flag = flag(tools);
+    const bool same = row->outbound.vfs == vfs && row->outbound.audio == audio_flag
+                      && row->outbound.video == video_flag && row->outbound.chat == chat_flag
+                      && row->outbound.tools == tools_flag;
+    if (same) {
+        out = *row;
+        return true;
+    }
+    std::vector<std::string> dropped;
+    if (row->outbound.vfs != vfs)
+        dropped.emplace_back("files");
+    if (row->outbound.audio == "on" && !audio)
+        dropped.emplace_back("audio");
+    if (row->outbound.video == "on" && !video)
+        dropped.emplace_back("video");
+    if (row->outbound.chat == "on" && !chat)
+        dropped.emplace_back("chat");
+    if (row->outbound.tools == "on" && !tools)
+        dropped.emplace_back("tools");
+    row->outbound.vfs = vfs;
+    row->outbound.audio = audio_flag;
+    row->outbound.video = video_flag;
+    row->outbound.chat = chat_flag;
+    row->outbound.tools = tools_flag;
+    ++row->outbound.revision;
+    if (!write_doc(file_, identity, rows, err))
+        return false;
+    for (const auto& capability : dropped)
+        pm::node::sessions_cancel(id, capability);
+    out = *row;
+    return true;
+}
+
 bool PairStore::revoke(std::string_view id, std::string& err) const
 {
     std::lock_guard<std::mutex> lock(store_mutex());

@@ -1915,6 +1915,8 @@ bool Service::authorize(const std::string& token, DeviceAuth& out)
         out.id = d.id;
         out.name = d.name;
         out.scopes = pm::lan::grant_scopes(d.outbound);
+        out.write = d.outbound.vfs == pm::lan::VfsGrant::Write;
+        out.revision = d.outbound.revision;
         return true;
     }
     return false;
@@ -1934,6 +1936,8 @@ std::vector<DeviceInfo> Service::devices()
         info.id = d.id;
         info.name = d.name;
         info.scopes = pm::lan::grant_scopes(d.outbound);
+        info.vfs = pm::lan::vfs_grant_name(d.outbound.vfs);
+        info.revision = d.outbound.revision;
         info.created = d.created;
         info.last_seen = d.last_seen;
         info.revoked = d.trust != pm::lan::Trust::Paired;
@@ -1971,6 +1975,8 @@ bool list_paired_device_infos(std::vector<DeviceInfo>& out, std::string& err)
         info.id = d.id;
         info.name = d.name;
         info.scopes = pm::lan::grant_scopes(d.outbound);
+        info.vfs = pm::lan::vfs_grant_name(d.outbound.vfs);
+        info.revision = d.outbound.revision;
         info.created = d.created;
         info.last_seen = d.last_seen;
         info.revoked = d.trust != pm::lan::Trust::Paired;
@@ -2041,6 +2047,33 @@ bool revoke_paired_device(const std::string& id, std::string& err)
         return false;
     }
     logger::info("lan pair: revoked " + id);
+    return true;
+}
+
+bool set_paired_device_grant(const std::string& id, const std::string& vfs, bool audio, bool video,
+                             bool chat, bool tools, std::string& err)
+{
+    if (!device_id_ok(id)) {
+        err = "device id is empty or not usable";
+        return false;
+    }
+    pm::lan::VfsGrant grant = pm::lan::VfsGrant::Off;
+    if (!pm::lan::parse_vfs_grant(vfs, grant)) {
+        err = "folder access is off, read, or write";
+        return false;
+    }
+    const fs::path dir = config_lan_dir(err);
+    if (dir.empty())
+        return false;
+    const fs::path path = dir / "devices.json";
+    pm::lan::PairStore store(path, static_cast<std::size_t>(k_max_devices));
+    pm::lan::Peer peer;
+    if (!store.set_caps(id, grant, audio, video, chat, tools, peer, err)) {
+        if (err.empty())
+            err = "no paired device with that id";
+        return false;
+    }
+    logger::info(std::string("lan pair: grant ") + id + " vfs=" + pm::lan::vfs_grant_name(grant));
     return true;
 }
 

@@ -125,6 +125,12 @@ public:
     bool set_grant(std::string_view id, VfsGrant vfs, const std::vector<std::string>& networks,
                    Peer& out, std::string& err) const;
 
+    /// Replaces vfs and the audio, video, chat, and tools switches. Networks stay.
+    /// The revision moves only when something changed. A capability that turns
+    /// off cancels that peer's live calls for it.
+    bool set_caps(std::string_view id, VfsGrant vfs, bool audio, bool video, bool chat, bool tools,
+                  Peer& out, std::string& err) const;
+
     /// The token stops working. The row stays so the UI can name the peer.
     bool revoke(std::string_view id, std::string& err) const;
 

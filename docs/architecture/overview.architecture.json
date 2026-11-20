@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Tanit node",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [1180, 620],
+    "views": [
+      {
+        "id": "listeners",
+        "label": "Listeners",
+        "focus": ["peers", "proxy", "phone", "gate", "core"],
+        "note": "Desktop node serve and the phone listener share the gate. The agent is a second mount, not a second server."
+      },
+      {
+        "id": "grants",
+        "label": "Grants",
+        "focus": ["gate", "pair", "vfs", "media"],
+        "note": "The pin is checked before the token. outbound on the pair row is what the peer may do."
+      },
+      {
+        "id": "features",
+        "label": "Features",
+        "focus": ["core", "vfs", "media", "agent"],
+        "note": "A feature that is off is not registered. An unknown /v1/ path is 404, not the agent."
+      }
+    ]
+  },
+  "components": [
+    { "id": "peers", "type": "external", "label": "Dialer", "sublabel": "phone or desktop", "pos": [30, 176], "size": [170, 68] },
+    { "id": "proxy", "type": "security", "label": "LAN proxy", "sublabel": "desktop TLS · mDNS", "pos": [250, 36], "size": [180, 64] },
+    { "id": "phone", "type": "frontend", "label": "Phone listener", "sublabel": "TLS on the port", "pos": [250, 360], "size": [180, 64] },
+    { "id": "gate", "type": "security", "label": "Auth gate", "sublabel": "pin, then token", "tag": "404 · 403 · 401", "pos": [250, 176], "size": [180, 68] },
+    { "id": "core", "type": "backend", "label": "node-core", "sublabel": "router · /v1/lan", "pos": [500, 176], "size": [190, 68] },
+    { "id": "pair", "type": "database", "label": "PairStore", "sublabel": "devices.json v2", "pos": [500, 360], "size": [190, 64] },
+    { "id": "vfs", "type": "backend", "label": "vfs", "sublabel": "/v1/vfs", "pos": [780, 40], "size": [180, 64] },
+    { "id": "media", "type": "backend", "label": "audio · video", "sublabel": "when capture exists", "pos": [780, 176], "size": [180, 64] },
+    { "id": "agent", "type": "backend", "label": "Agent layer", "sublabel": "llm agent --serve", "tag": "optional", "pos": [780, 360], "size": [180, 64] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "One listener", "wraps": ["gate", "core", "pair", "vfs", "media"] }
+  ],
+  "connections": [
+    { "id": "peers-proxy", "from": "peers", "to": "proxy", "label": "saved URL" },
+    { "id": "peers-phone", "from": "peers", "to": "phone", "label": "saved URL" },
+    { "id": "proxy-gate", "from": "proxy", "to": "gate", "label": "TLS pin", "variant": "security", "labelAt": [340, 114] },
+    { "id": "phone-gate", "from": "phone", "to": "gate", "label": "TLS pin", "variant": "security" },
+    { "id": "gate-core", "from": "gate", "to": "core", "label": "admit", "variant": "emphasis" },
+    { "id": "gate-pair", "from": "gate", "to": "pair", "label": "outbound" },
+    { "id": "core-vfs", "from": "core", "to": "vfs", "label": "/v1/vfs" },
+    { "id": "core-media", "from": "core", "to": "media", "label": "capture", "labelAt": [860, 158] },
+    { "id": "agent-core", "from": "agent", "to": "core", "label": "same gate", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "One listener", "items": ["node serve mounts lan, vfs, and capture when the binary has it. llm agent --serve adds the agent on that same gate."] },
+    { "dot": "rose", "title": "Gate", "items": ["The pin is checked before the token. A missing route is 404. A grant miss is 403. No credential is 401."] },
+    { "dot": "violet", "title": "Not linked", "items": ["encryption.cpp stays out. Direct vfs, audio, and video stay on authenticated TLS."] }
+  ]
+}

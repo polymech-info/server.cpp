@@ -43,21 +43,33 @@ target_link_libraries(${HOST_TARGET} PRIVATE pm-server-lib)
 
 `pm_server_add_lan` and `pm_server_add_mdns` add the platform files. The phone image compiles the list from `pm_server_phone_sources` itself, so those two `.cpp` files are not also inside `pm-server-lib` on Android.
 
-## Diagrams
+## Architecture
 
-Class, flow, and sequence diagrams, in Mermaid.
+Interactive copy: [docs/architecture](docs/architecture/architecture.md). Background is [docs/tanit-mesh.md](./docs/tanit-mesh.md).
+
+`node serve` and the phone listener share one gate. `llm agent --serve` mounts the agent on that gate. A feature that is off is not registered. `encryption.cpp` is not linked.
+
+![Tanit node: dialer, gate, and route groups](docs/architecture/overview.visual-check.1440x900.light.png)
+
+The pin is checked before the token. `PairStore` version 2 is the pair file. vfs calls [vfs.cpp](../vfs.cpp/README.md). audio and video call [audio.cpp](../audio.cpp/README.md) and video.cpp when those captures are compiled in.
+
+A paired desktop or phone can read the other's vfs over LAN or a saved Tailscale URL. Audio and video answer on the desktop listener. The phone listener serves folders only. Chrome stays on the local native host.
+
+![Who can reach vfs, audio, and video](docs/architecture/topologies.visual-check.1440x900.light.png)
+
+Older notes, in Mermaid:
 
 | File | Shows |
 | --- | --- |
 | [docs/node-today.md](docs/node-today.md) | Both listeners as they compile now: build targets, types, the two gates, pairing, and a phone folder read |
-| [docs/node-refactor.md](docs/node-refactor.md) | Target folders: `node-core`, `node-transports`, `node-features`, `node-e2ee`. The router and the gate. Tanit-mesh sections 10 and 11 are the exits |
+| [docs/node-refactor.md](docs/node-refactor.md) | Target folders: `node-core`, `node-transports`, `node-features`, `node-e2ee`. The router and the gate |
 | [docs/node-impl.md](docs/node-impl.md) | The commits. One commit leaves `tanit`, `tanit-cli`, and `test:vfs-phone` green |
-| [docs/encryption-seams.md](docs/encryption-seams.md) | Snapshot of a proposed link. Tanit-mesh section 7 and phase 5 supersede it: the library stays unlinked |
+| [docs/encryption-seams.md](docs/encryption-seams.md) | Snapshot of a proposed link. Tanit-mesh section 7 supersedes it: the library stays unlinked |
 
 ## Next
 
-Design and the todo list are in [docs/tanit-mesh.md](../../docs/tanit-mesh.md), sections 10 and 11. The commits are in [docs/node-impl.md](docs/node-impl.md). First the three link fixes already due, then TLS on the phone listener, with the pin checked before the token. Then a `node serve` verb that listens without the agent, so a build with `FEATURE_COMMAND_LLM` off can receive a phone folder.
+What is still open is [docs/tanit-mesh.md](./docs/tanit-mesh.md) section 11.
 
-- Desktop route files still include the agent. Those routes are the agent. The pair file and the grant check now live in this package. Paths, strings, and logging stay in [commons.cpp](../commons.cpp/README.md). The host reads bookmark rows from the settings store and passes them in.
-- Treat [encryption.cpp](../encryption.cpp/README.md) as the protocol library. `pm::host::Device`, `media-host`, and `pm-encryption server` exist to exercise frames on a loopback. They are not the product host.
-- New features on this node, not a second server. Audio and video are route groups beside vfs, including when the agent is off. `encryption.cpp` stays unlinked until a feature has to hide bytes from a store the peer is not serving. An in-process LLM is a local principal, not a paired device.
+- E2EE is only for a file a relay or another store will hold. Direct vfs, audio, and video stay on authenticated TLS. `pm-server-lib` and `node serve` do not link [encryption.cpp](../encryption.cpp/README.md).
+- The tray and the built-in GUI still start a node that can answer 401 and `invalid LAN hop`. `node serve` listens on 8092, TLS 8093. The agent stays on 8090. A hop this process did not write is 400. No serve key and no pair token is 401.
+- Audio and video are route groups beside vfs, including when the agent is off. An in-process LLM is a local principal, not a paired device. Paths, strings, and logging stay in [commons.cpp](../commons.cpp/README.md).

@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Supported access",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [1120, 640],
+    "views": [
+      {
+        "id": "devices",
+        "label": "Devices",
+        "focus": ["chrome", "desktop", "phone", "lan"],
+        "note": "Chrome stays on this machine. Desktop and Android dial a saved LAN or Tailscale URL."
+      },
+      {
+        "id": "desktop",
+        "label": "Desktop yield",
+        "focus": ["lan", "dgate", "dvfs", "audio", "video", "llm"],
+        "note": "The desktop listener serves vfs, audio, and video. Chat exists only while the agent is mounted."
+      },
+      {
+        "id": "phone",
+        "label": "Phone yield",
+        "focus": ["lan", "pgate", "pvfs"],
+        "note": "The phone listener serves vfs. Audio and video routes are not mounted there."
+      }
+    ]
+  },
+  "components": [
+    { "id": "chrome", "type": "frontend", "label": "Chrome extension", "sublabel": "native host", "pos": [24, 36], "size": [170, 64] },
+    { "id": "desktop", "type": "frontend", "label": "Desktop", "sublabel": "node serve · agent", "pos": [24, 180], "size": [170, 64] },
+    { "id": "phone", "type": "frontend", "label": "Android", "sublabel": "listener · dialer", "pos": [24, 400], "size": [170, 64] },
+    { "id": "lan", "type": "external", "label": "LAN · Tailscale", "sublabel": "saved unicast URL", "pos": [250, 250], "size": [180, 64] },
+    { "id": "dgate", "type": "security", "label": "Desktop gate", "sublabel": "pin, then token", "pos": [490, 48], "size": [170, 64] },
+    { "id": "pgate", "type": "security", "label": "Phone gate", "sublabel": "pin, then token", "pos": [490, 430], "size": [170, 64] },
+    { "id": "dvfs", "type": "backend", "label": "vfs", "sublabel": "desktop folders", "pos": [740, 36], "size": [180, 56] },
+    { "id": "audio", "type": "backend", "label": "audio", "sublabel": "/v1/audio", "pos": [740, 130], "size": [180, 56] },
+    { "id": "video", "type": "backend", "label": "video", "sublabel": "grant on", "pos": [740, 224], "size": [180, 56] },
+    { "id": "llm", "type": "backend", "label": "llm server", "sublabel": "agent --serve", "tag": "optional", "pos": [740, 318], "size": [180, 56] },
+    { "id": "pvfs", "type": "database", "label": "phone vfs", "sublabel": "shared folders", "pos": [740, 434], "size": [180, 56] }
+  ],
+  "connections": [
+    { "id": "chrome-desktop", "from": "chrome", "to": "desktop", "label": "pipe", "variant": "dashed", "labelAt": [109, 114] },
+    { "id": "desktop-lan", "from": "desktop", "to": "lan", "label": "dial", "variant": "emphasis" },
+    { "id": "phone-lan", "from": "phone", "to": "lan", "label": "dial", "variant": "emphasis" },
+    { "id": "lan-dgate", "from": "lan", "to": "dgate", "label": "pin", "variant": "security" },
+    { "id": "lan-pgate", "from": "lan", "to": "pgate", "label": "pin", "variant": "security" },
+    { "id": "dgate-dvfs", "from": "dgate", "to": "dvfs" },
+    { "id": "dgate-audio", "from": "dgate", "to": "audio" },
+    { "id": "dgate-video", "from": "dgate", "to": "video" },
+    { "id": "dgate-llm", "from": "dgate", "to": "llm", "label": "chat", "variant": "dashed", "labelAt": [800, 300] },
+    { "id": "pgate-pvfs", "from": "pgate", "to": "pvfs", "label": "vfs" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Yield", "items": ["A paired desktop or phone can read the other's vfs. Audio and video answer on the desktop. The phone listener does not mount them."] },
+    { "dot": "rose", "title": "Tailscale", "items": ["A saved 100.x or ts.net URL is another dial. It does not replace the pin or the token."] },
+    { "dot": "violet", "title": "Chrome", "items": ["The extension reaches this desktop through the native host. It is not a pair and it does not cross the LAN."] }
+  ]
+}
