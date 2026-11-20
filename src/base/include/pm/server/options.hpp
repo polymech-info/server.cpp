@@ -9,6 +9,7 @@
 #include "string/string_utils.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -31,6 +32,9 @@ struct ListenOptions {
     std::string lan_name;
     bool pair_on_start = false;
     std::vector<std::string> pair_scopes;
+    /// Capture format when a start body omits sampleRate or bits.
+    std::uint32_t audio_sample_rate = 48000;
+    std::uint32_t audio_bits = 16;
 
     ServerFeatures features;
     std::string service = "tanit-node";

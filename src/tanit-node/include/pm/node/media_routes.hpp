@@ -15,6 +15,8 @@ using MediaAuthFn = std::function<bool(const httplib::Request&, httplib::Respons
 
 void stop_llm_video_host();
 void stop_llm_audio_host();
+/// Default capture format for a start body that omits sampleRate or bits.
+void set_audio_capture_format(std::uint32_t sample_rate, std::uint32_t bits);
 void register_video_routes(httplib::Server& svr, const MediaAuthFn& require_v1_auth);
 void register_audio_routes(httplib::Server& svr, const MediaAuthFn& require_v1_auth);
 

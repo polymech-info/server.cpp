@@ -89,6 +89,7 @@ void mount_node(httplib::Server& server, const pm::server::ListenOptions& option
         res.status = 200;
         res.set_content(preset_models_json().dump(), "application/json");
     });
+    media_cli::node_detail::set_audio_capture_format(options.audio_sample_rate, options.audio_bits);
     if (options.features.audio)
         media_cli::node_detail::register_audio_routes(server, require_v1_auth);
     if (options.features.video)
@@ -152,6 +153,8 @@ int run_node_serve(const pm::server::ListenOptions& incoming)
             << (options.serve_api_key.empty() ? "off" : "on");
         if (options.lan)
             out << "; lan=on";
+        if (options.features.audio)
+            out << "; audio=" << options.audio_sample_rate << "/" << options.audio_bits;
         out << ")\n  stop: Ctrl+C\n" << std::flush;
         logger::info(std::string("node serve listening on ") + base);
     };

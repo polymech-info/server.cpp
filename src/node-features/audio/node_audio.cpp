@@ -24,6 +24,16 @@ std::shared_ptr<pm::audio::SourceHost> g_llm_audio_host;
 std::shared_ptr<pm::audio::SinkHost> g_llm_audio_sink;
 #endif
 
+void set_audio_capture_format(std::uint32_t sample_rate, std::uint32_t bits)
+{
+#if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
+    pm::audio::SourceHost::set_capture_format(sample_rate, bits);
+#else
+    (void)sample_rate;
+    (void)bits;
+#endif
+}
+
 void stop_llm_audio_host()
 {
 #if defined(FEATURE_AUDIO_SOURCES) && FEATURE_AUDIO_SOURCES
@@ -78,14 +88,32 @@ void register_audio_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
                 return;
             write_audio(res, host->start(body));
         });
-        svr.Post("/v1/audio/stop", [host, require_v1_auth, write_audio](const httplib::Request& req,
-                                                                        httplib::Response& res) {
+        svr.Post("/v1/audio/stop", [host, require_v1_auth, write_audio, read_body](const httplib::Request& req,
+                                                                                   httplib::Response& res) {
             if (!require_v1_auth(req, res))
                 return;
-            host->stop();
+            std::uint64_t session = 0;
+            if (!req.body.empty()) {
+                nlohmann::json body;
+                if (!read_body(req, res, body))
+                    return;
+                if (body.contains("session") && !body["session"].is_null()) {
+                    if (!body["session"].is_number_integer() && !body["session"].is_number_unsigned()) {
+                        res.status = 400;
+                        res.set_content(nlohmann::json{{"ok", false}, {"error", "session must be a number"}}
+                                            .dump(2) + "\n",
+                                        "application/json; charset=utf-8");
+                        return;
+                    }
+                    session = body["session"].get<std::uint64_t>();
+                }
+            }
+            const bool stopped = host->stop_session(session);
             auto reply = host->status();
             reply.body["accepted"] = true;
-            reply.body["stopped"] = true;
+            reply.body["stopped"] = stopped;
+            if (!stopped)
+                reply.body["stale"] = true;
             write_audio(res, reply);
         });
         svr.Post("/v1/audio/source", [host, require_v1_auth, write_audio, read_body](const httplib::Request& req,
@@ -110,9 +138,56 @@ void register_audio_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
                                 "application/json; charset=utf-8");
                 return;
             }
+            std::uint64_t bound = idle.body.value("session", static_cast<std::uint64_t>(0));
+            if (req.has_param("session")) {
+                try {
+                    bound = static_cast<std::uint64_t>(std::stoull(req.get_param_value("session")));
+                } catch (...) {
+                    res.status = 400;
+                    res.set_content(nlohmann::json{{"ok", false}, {"error", "session must be a number"}}.dump(2) +
+                                        "\n",
+                                    "application/json; charset=utf-8");
+                    return;
+                }
+            }
+            if (bound == 0 || bound != idle.body.value("session", static_cast<std::uint64_t>(0))) {
+                res.status = 409;
+                res.set_content(nlohmann::json{{"ok", false},
+                                               {"error", "audio capture session changed"},
+                                               {"phase", "idle"}}
+                                    .dump(2) + "\n",
+                                "application/json; charset=utf-8");
+                return;
+            }
             res.set_header("Cache-Control", "no-cache");
             res.set_header("X-Audio-Sample-Rate", std::to_string(idle.body.value("sampleRate", 48000)));
             res.set_header("X-Audio-Channels", std::to_string(idle.body.value("channels", 2)));
+            res.set_header("X-Audio-Bits", std::to_string(idle.body.value("bits", 16)));
+            res.set_header("X-Audio-Session", std::to_string(bound));
+            const auto cursor = std::make_shared<std::uint64_t>(host->subscribe(bound));
+            if (*cursor == 0) {
+                res.status = 409;
+                res.set_content(nlohmann::json{{"ok", false},
+                                               {"error", "audio capture session changed"},
+                                               {"phase", "idle"}}
+                                    .dump(2) + "\n",
+                                "application/json; charset=utf-8");
+                return;
+            }
+            struct CursorGuard {
+                std::shared_ptr<pm::audio::SourceHost> host;
+                std::uint64_t session = 0;
+                std::shared_ptr<std::uint64_t> cursor;
+                ~CursorGuard()
+                {
+                    if (host && cursor && *cursor != 0)
+                        host->unsubscribe(session, *cursor);
+                }
+            };
+            auto guard = std::make_shared<CursorGuard>();
+            guard->host = host;
+            guard->session = bound;
+            guard->cursor = cursor;
             std::shared_ptr<pm::node::LiveSession> session;
             std::string pair_token;
             if (g_lan) {
@@ -129,7 +204,7 @@ void register_audio_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
                 std::chrono::steady_clock::now());
             res.set_chunked_content_provider(
                 "application/octet-stream",
-                [host, session, pair_token, checked](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                [host, session, pair_token, checked, bound, guard](size_t /*offset*/, httplib::DataSink& sink) -> bool {
                     if (session && session->cancelled()) {
                         sink.done();
                         return false;
@@ -144,7 +219,7 @@ void register_audio_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
                         }
                     }
                     std::int16_t buf[960];
-                    const int frames = host->pull(buf, 480, 200);
+                    const int frames = host->pull_cursor(bound, guard->cursor ? *guard->cursor : 0, buf, 480, 200);
                     if (frames < 0) {
                         sink.done();
                         return false;
