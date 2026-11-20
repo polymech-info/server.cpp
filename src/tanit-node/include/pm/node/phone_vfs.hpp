@@ -15,8 +15,13 @@ struct PhoneVfsInfo {
     bool listening = false;
     int port = 0;
     std::string authority;
+    /// SHA-256 of this listener's certificate. Empty until it is listening.
+    std::string pin;
     std::string error;
 };
+
+/// Start the listener even when no folder is shared. Pairing uses this.
+PhoneVfsInfo phone_vfs_listen(const std::string& profile_dir);
 
 /// Start when a shared folder exists, stop when none do. Idempotent.
 /// Starting grants nothing: a peer still needs a token, a network, and vfs on.
@@ -51,5 +56,16 @@ bool phone_lan_repair(const std::string& profile_dir, const std::string& id, std
 /// The body this phone posts to that computer. `rotate` adds a new token.
 bool phone_lan_announce(const std::string& profile_dir, const std::string& id, const std::string& name,
                         bool rotate, std::string& json, std::string& err);
+
+/// Opens a pairing window and returns the QR modules. No secret leaves this JSON.
+std::string phone_lan_open_ticket(const std::string& profile_dir, const std::string& name);
+
+void phone_lan_close_ticket();
+
+/// Stores the other phone on this phone's pair file. @p token is the `tn1_`
+/// plaintext and is wrapped before it is written. The row grants nothing.
+bool phone_lan_remember_peer(const std::string& profile_dir, const std::string& id,
+                             const std::string& name, const std::string& tls_fp,
+                             const std::string& url, const std::string& token, std::string& err);
 
 } // namespace pm::node

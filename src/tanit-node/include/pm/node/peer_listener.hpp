@@ -72,6 +72,15 @@ public:
     [[nodiscard]] int port() const;
     /// SHA-256 of this listener's certificate, 64 hex digits. Empty until start().
     [[nodiscard]] std::string pin() const;
+    /// True while a pairing window is open. A sync that requires shared folders
+    /// leaves the listener up for that window.
+    [[nodiscard]] bool pairing() const;
+    /// Opens the same `tanit://pair` window a desktop opens. While it is open,
+    /// this listener also accepts connections on Wi-Fi and Ethernet, not only
+    /// on networks a peer was already granted. The secret is inside @p uri.
+    bool open_pair_window(const std::string& name, const std::string& host, std::string& uri,
+                          std::string& err);
+    void close_pair_window();
 
 private:
     struct Impl;

@@ -55,6 +55,11 @@ bool list_paired_devices(std::string&, std::string& err)
     err = k_unsupported;
     return false;
 }
+bool list_paired_device_infos(std::vector<DeviceInfo>&, std::string& err)
+{
+    err = k_unsupported;
+    return false;
+}
 bool revoke_paired_device(const std::string&, std::string& err)
 {
     err = k_unsupported;

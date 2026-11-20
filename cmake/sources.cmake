@@ -89,5 +89,6 @@ function(pm_server_phone_sources out_var)
     ${_portable}
     "${_root}/src/node-core/lifecycle/node.cpp"
     "${_root}/src/node-transports/phone/vfs_listener.cpp"
+    "${_root}/src/node-transports/desktop/lan_qr.cpp"
     PARENT_SCOPE)
 endfunction()

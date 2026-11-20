@@ -1409,6 +1409,7 @@ bool register_mdns(LanServiceImpl& impl, std::string& err)
         {"v", std::to_string(k_protocol_version)},
         {"fp", impl.fingerprint},
         {"name", impl.name},
+        {"role", "computer"},
     };
     return impl.mdns.start(pub, err);
 }
@@ -1947,6 +1948,35 @@ bool Service::revoke(const std::string& id, std::string& err)
         std::lock_guard lock(impl_->mu);
         return reload_devices_unlocked(*impl_, err);
     }();
+}
+
+bool list_paired_device_infos(std::vector<DeviceInfo>& out, std::string& err)
+{
+    out.clear();
+    const fs::path dir = config_lan_dir(err);
+    if (dir.empty())
+        return false;
+    const fs::path path = dir / "devices.json";
+    std::string identity;
+    std::vector<pm::lan::Peer> peers;
+    pm::lan::PairStore store(path, static_cast<std::size_t>(k_max_devices));
+    if (!store.load_identity(identity, peers, err)) {
+        if (err != "pair file uses ticket scopes" || !import_ticket_file(path, err) ||
+            !store.load_identity(identity, peers, err))
+            return false;
+    }
+    err.clear();
+    for (const auto& d : peers) {
+        DeviceInfo info;
+        info.id = d.id;
+        info.name = d.name;
+        info.scopes = pm::lan::grant_scopes(d.outbound);
+        info.created = d.created;
+        info.last_seen = d.last_seen;
+        info.revoked = d.trust != pm::lan::Trust::Paired;
+        out.push_back(std::move(info));
+    }
+    return true;
 }
 
 bool list_paired_devices(std::string& text, std::string& err)

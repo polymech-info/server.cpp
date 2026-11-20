@@ -24,10 +24,16 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include "string/string_utils.hpp"
+
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <mutex>
 #include <thread>
+#if defined(_WIN32)
+#include <bcrypt.h>
+#endif
 #include <utility>
 
 namespace pm::node {
@@ -151,7 +157,64 @@ struct PeerListener::Impl {
     PhoneTls* tls = nullptr;
     std::string pin;
     int port = 0;
+    std::atomic<bool> pair_open{false};
+    std::string pair_secret;
+    std::chrono::steady_clock::time_point pair_expires{};
+    int pair_failures = 0;
+    std::chrono::steady_clock::time_point pair_locked{};
 };
+
+bool fill_random(std::uint8_t* out, std::size_t n)
+{
+#if defined(_WIN32)
+    return BCRYPT_SUCCESS(BCryptGenRandom(nullptr, out, static_cast<ULONG>(n),
+                                          BCRYPT_USE_SYSTEM_PREFERRED_RNG));
+#else
+    std::ifstream in("/dev/urandom", std::ios::binary);
+    if (!in)
+        return false;
+    in.read(reinterpret_cast<char*>(out), static_cast<std::streamsize>(n));
+    return in.gcount() == static_cast<std::streamsize>(n);
+#endif
+}
+
+bool same_secret(std::string_view a, std::string_view b)
+{
+    unsigned diff = static_cast<unsigned>(a.size() ^ b.size());
+    const std::size_t n = a.size() < b.size() ? a.size() : b.size();
+    for (std::size_t i = 0; i < n; ++i)
+        diff |= static_cast<unsigned>(a[i]) ^ static_cast<unsigned>(b[i]);
+    return diff == 0;
+}
+
+std::string query_encode(std::string_view text)
+{
+    std::string out;
+    for (unsigned char c : text) {
+        const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+            || c == '-' || c == '_' || c == '.' || c == '~';
+        if (plain) {
+            out.push_back(static_cast<char>(c));
+            continue;
+        }
+        static const char* hex = "0123456789ABCDEF";
+        out.push_back('%');
+        out.push_back(hex[c >> 4]);
+        out.push_back(hex[c & 0x0F]);
+    }
+    return out;
+}
+
+void push_address(std::vector<std::string>& out, const std::string& address)
+{
+    if (address.empty() || address == "0.0.0.0" || address.find(':') != std::string::npos)
+        return;
+    for (const auto& have : out) {
+        if (have == address)
+            return;
+    }
+    out.push_back(address);
+}
 
 std::vector<std::string> granted_addresses(const PeerListenerHost& host, const pm::lan::PairStore& store)
 {
@@ -189,6 +252,22 @@ std::vector<std::string> granted_addresses(const PeerListenerHost& host, const p
     return out;
 }
 
+/// While a pairing window is open, Wi-Fi and Ethernet accept the ticket.
+/// A granted address stays. Mobile data does not.
+std::vector<std::string> listen_addresses(const PeerListenerHost& host, const pm::lan::PairStore& store,
+                                          bool pairing)
+{
+    std::vector<std::string> out = granted_addresses(host, store);
+    if (!pairing || !host.networks)
+        return out;
+    for (const auto& net : host.networks()) {
+        if (net.kind == "mobile")
+            continue;
+        push_address(out, net.address);
+    }
+    return out;
+}
+
 PeerListener::PeerListener() : impl_(std::make_unique<Impl>()) {}
 
 PeerListener::~PeerListener()
@@ -214,6 +293,67 @@ std::string PeerListener::pin() const
     return impl_->pin;
 }
 
+bool PeerListener::pairing() const
+{
+    return impl_->pair_open.load();
+}
+
+bool PeerListener::open_pair_window(const std::string& name, const std::string& host, std::string& uri,
+                                    std::string& err)
+{
+    uri.clear();
+    err.clear();
+    std::uint8_t raw[16];
+    if (!fill_random(raw, sizeof raw)) {
+        err = "could not open a pairing window";
+        return false;
+    }
+    const std::string secret = "tp1_" + media::strutil::base64url(raw, sizeof raw);
+    std::string pin;
+    int port = 0;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mu);
+        if (!impl_->server || impl_->pin.size() != 64 || impl_->port <= 0) {
+            err = "this phone is not listening";
+            return false;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (impl_->pair_failures >= 8 && now < impl_->pair_locked) {
+            err = "too many pairing attempts";
+            return false;
+        }
+        impl_->pair_secret = secret;
+        impl_->pair_open = true;
+        impl_->pair_expires = now + std::chrono::seconds(300);
+        pin = impl_->pin;
+        port = impl_->port;
+    }
+    std::string label = name;
+    std::string link = "tanit://pair?v=1&host=" + host + "&port=" + std::to_string(port)
+        + "&fp=" + pin + "&secret=" + secret + "&name=" + query_encode(label);
+    while (link.size() > 200 && !label.empty()) {
+        label.pop_back();
+        link = "tanit://pair?v=1&host=" + host + "&port=" + std::to_string(port)
+            + "&fp=" + pin + "&secret=" + secret + "&name=" + query_encode(label);
+    }
+    if (link.size() > 200) {
+        std::lock_guard<std::mutex> lock(impl_->mu);
+        impl_->pair_open = false;
+        impl_->pair_secret.clear();
+        err = "the pairing code does not fit";
+        return false;
+    }
+    uri = link;
+    return true;
+}
+
+void PeerListener::close_pair_window()
+{
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    impl_->pair_open = false;
+    impl_->pair_secret.clear();
+}
+
 void PeerListener::stop()
 {
     impl_->watch_stop.store(true);
@@ -229,6 +369,8 @@ void PeerListener::stop()
         server = std::move(impl_->server);
         thread = std::move(impl_->thread);
         impl_->port = 0;
+        impl_->pair_open = false;
+        impl_->pair_secret.clear();
     }
     if (watch.joinable())
         watch.join();
@@ -264,6 +406,8 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
     server->set_pre_routing_handler([shared](const httplib::Request& req, httplib::Response& res) {
         if (shared->host.enter)
             shared->host.enter();
+        if (req.method == "POST" && req.path == "/v1/lan/pair")
+            return httplib::Server::HandlerResponse::Unhandled;
         if (!shared->store.any_peer_on(arrived_on(req))) {
             shared->note(true, shared->where(req) + " deny network");
             send(res, 403, refusal("ENETWORK", "This network is not granted."));
@@ -275,6 +419,77 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
             return httplib::Server::HandlerResponse::Handled;
         }
         return httplib::Server::HandlerResponse::Unhandled;
+    });
+
+    server->Post("/v1/lan/pair", [this, shared](const httplib::Request& req, httplib::Response& res) {
+        const nlohmann::json body = nlohmann::json::parse(req.body.empty() ? "{}" : req.body, nullptr, false);
+        if (!body.is_object()) {
+            send(res, 400, refusal("EBODY", "The announce is not valid."));
+            return;
+        }
+        const std::string secret = body.value("secret", std::string{});
+        const std::string device_id = body.value("device_id", std::string{});
+        const std::string device_name = body.value("device_name", std::string{});
+        bool mismatch = false;
+        {
+            std::lock_guard<std::mutex> lock(impl_->mu);
+            const auto now = std::chrono::steady_clock::now();
+            if (!impl_->pair_open) {
+                send(res, 404, refusal("EPAIR", "No pairing window is open."));
+                return;
+            }
+            if (now >= impl_->pair_expires) {
+                impl_->pair_open = false;
+                impl_->pair_secret.clear();
+                send(res, 410, refusal("EPAIR", "The pairing window expired."));
+                return;
+            }
+            if (impl_->pair_failures >= 8 && now < impl_->pair_locked) {
+                res.set_header("Retry-After", "30");
+                send(res, 429, refusal("EPAIR", "Too many pairing attempts."));
+                return;
+            }
+            if (!same_secret(secret, impl_->pair_secret)) {
+                ++impl_->pair_failures;
+                if (impl_->pair_failures >= 8)
+                    impl_->pair_locked = now + std::chrono::seconds(30);
+                mismatch = true;
+            }
+        }
+        if (mismatch) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            send(res, 401, refusal("EPAIR", "The pairing secret was not accepted."));
+            return;
+        }
+        if (!pm::lan::peer_id_valid(device_id)) {
+            send(res, 400, refusal("EPAIR", "The device id is not valid."));
+            return;
+        }
+        pm::lan::Peer peer;
+        std::string err;
+        std::string token;
+        if (!shared->store.ensure_peer(device_id, device_name, "", peer, err)
+            || !shared->store.issue_token(device_id, token, err)) {
+            send(res, 403, refusal("EPAIR", err.empty() ? "Pairing was refused." : err));
+            return;
+        }
+        std::string pin;
+        {
+            std::lock_guard<std::mutex> lock(impl_->mu);
+            impl_->pair_open = false;
+            impl_->pair_secret.clear();
+            pin = impl_->pin;
+        }
+        shared->note(false, std::string("[phone-vfs] paired ") + device_id);
+        send(res, 200, {
+            {"ok", true},
+            {"role", "phone"},
+            {"token", token},
+            {"device_id", device_id},
+            {"host_id", shared->host.authority},
+            {"fingerprint", pin},
+            {"protocol", 1},
+        });
     });
 
     server->Get("/health", [shared](const httplib::Request&, httplib::Response& res) {
@@ -467,7 +682,8 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
         impl_->watch = std::thread([this, shared, tls] {
             std::string applied;
             while (!impl_->watch_stop.load()) {
-                const std::vector<std::string> addresses = granted_addresses(shared->host, shared->store);
+                const std::vector<std::string> addresses =
+                    listen_addresses(shared->host, shared->store, impl_->pair_open);
                 std::string now;
                 for (const auto& address : addresses)
                     now += address + " ";

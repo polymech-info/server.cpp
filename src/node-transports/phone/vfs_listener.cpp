@@ -7,6 +7,7 @@
 
 #include "core/settings_portable.hpp"
 #include "lan/pair_store.hpp"
+#include "lan/tanit_lan_qr.hpp"
 #include "logging/logger.h"
 #include "pm/node/node.hpp"
 #include "pm/node/listener_tls.hpp"
@@ -177,7 +178,7 @@ void phone_vfs_stop()
     g_listener.stop();
 }
 
-PhoneVfsInfo phone_vfs_sync(const std::string& profile_dir)
+PhoneVfsInfo sync_listener(const std::string& profile_dir, bool require_folders)
 {
     std::lock_guard<std::mutex> lock(g_mu);
     PhoneVfsInfo info;
@@ -188,7 +189,7 @@ PhoneVfsInfo phone_vfs_sync(const std::string& profile_dir)
     if (!profile_ok(profile_dir))
         return info;
     media::portable_settings::set_profile_dir_override(profile_dir);
-    if (pm::server::shared_folder_roots().empty()) {
+    if (require_folders && pm::server::shared_folder_roots().empty() && !g_listener.pairing()) {
         g_listener.stop();
         return info;
     }
@@ -196,6 +197,7 @@ PhoneVfsInfo phone_vfs_sync(const std::string& profile_dir)
         info.listening = true;
         info.port = g_listener.port();
         info.authority = g_authority;
+        info.pin = g_listener.pin();
         return info;
     }
     g_listener.stop();
@@ -231,7 +233,18 @@ PhoneVfsInfo phone_vfs_sync(const std::string& profile_dir)
     info.listening = true;
     info.port = g_listener.port();
     info.authority = authority;
+    info.pin = g_listener.pin();
     return info;
+}
+
+PhoneVfsInfo phone_vfs_sync(const std::string& profile_dir)
+{
+    return sync_listener(profile_dir, true);
+}
+
+PhoneVfsInfo phone_vfs_listen(const std::string& profile_dir)
+{
+    return sync_listener(profile_dir, false);
 }
 
 PhoneVfsInfo phone_vfs_status(std::string& uris_json)
@@ -242,6 +255,7 @@ PhoneVfsInfo phone_vfs_status(std::string& uris_json)
     info.listening = g_listener.listening();
     info.port = g_listener.port();
     info.authority = g_authority;
+    info.pin = g_listener.pin();
     if (!info.listening)
         return info;
     media::portable_settings::set_profile_dir_override(g_profile);
@@ -355,6 +369,80 @@ bool phone_lan_announce(const std::string& profile_dir, const std::string& id, c
         return false;
     return peer_announce_json(pm::lan::PairStore(pair_file(profile_dir)), id, authority, name, port, pin,
                               local_networks(), rotate, json, err);
+}
+
+std::string phone_lan_open_ticket(const std::string& profile_dir, const std::string& name)
+{
+    const PhoneVfsInfo info = phone_vfs_listen(profile_dir);
+    if (!info.listening) {
+        return nlohmann::json{
+            {"ok", false},
+            {"error", info.error.empty() ? "this phone is not listening" : info.error},
+        }.dump();
+    }
+    std::string host;
+    for (const auto& net : local_networks()) {
+        if (net.kind == "mobile" || net.address.empty())
+            continue;
+        if (net.kind == "wifi" || host.empty())
+            host = net.address;
+        if (net.kind == "wifi")
+            break;
+    }
+    if (host.empty()) {
+        return nlohmann::json{{"ok", false}, {"error", "this phone is not on a network"}}.dump();
+    }
+    std::string uri;
+    std::string err;
+    if (!g_listener.open_pair_window(name, host, uri, err)) {
+        return nlohmann::json{{"ok", false}, {"error", err.empty() ? "could not open a pairing window" : err}}
+            .dump();
+    }
+    std::vector<std::uint8_t> modules;
+    int qr_size = 0;
+    std::string qr_err;
+    if (!media_cli::lan::encode_qr(uri, modules, qr_size, qr_err)) {
+        g_listener.close_pair_window();
+        return nlohmann::json{{"ok", false}, {"error", qr_err.empty() ? "the pairing code does not fit" : qr_err}}
+            .dump();
+    }
+    std::string bits;
+    bits.reserve(modules.size());
+    for (std::uint8_t module : modules)
+        bits.push_back(module ? '1' : '0');
+    return nlohmann::json{
+        {"ok", true},
+        {"port", info.port},
+        {"fingerprint", info.pin},
+        {"role", "phone"},
+        {"qr_size", qr_size},
+        {"qr", bits},
+    }.dump();
+}
+
+void phone_lan_close_ticket()
+{
+    g_listener.close_pair_window();
+}
+
+bool phone_lan_remember_peer(const std::string& profile_dir, const std::string& id,
+                             const std::string& name, const std::string& tls_fp,
+                             const std::string& url, const std::string& token, std::string& err)
+{
+    if (!profile_ok(profile_dir)) {
+        err = "no profile";
+        return false;
+    }
+    if (token.rfind("tn1_", 0) != 0) {
+        err = "the peer token is not valid";
+        return false;
+    }
+    std::string stored;
+    if (!pm::android::secure_encrypt(token, stored, err))
+        return false;
+    pm::lan::Peer peer;
+    return pm::lan::PairStore(pair_file(profile_dir))
+        .set_dial(id, name, std::vector<std::string>{url}, tls_fp, stored, peer, err);
 }
 
 } // namespace pm::node
