@@ -219,6 +219,255 @@ This replaces PairStore version 2 in one schema change. There is no version 2 co
 - The QR still carries one pin. The desktop dial book stores the phone pin from the announce. The phone's row for the desktop listener pin is not filled by that same ticket.
 - On one computer, the phone listener's default 8092 is the node HTTP port, and 8093 is the node TLS port. Two devices do not share that socket. A `phone-listener` test on the machine that is already serving the node does.
 
+### Flows: desktop ↔ phone (pair → grant → vfs)
+
+Read this when you need the order of calls and which class owns each step. Tables and capability text above stay the contract; the diagrams are the walkthrough.
+
+#### Objects in play
+
+| Object | Owner | Role |
+|---|---|---|
+| `PairingTicket` (`tp1_`, in memory) | Desktop `lan_win::Service` | Short-lived QR secret. Decide that confirm is allowed. Not the grant. |
+| Pair token (`tn1_`) | Issued once at confirm; hash on server row; plaintext on dialer | Identifies the peer on later requests. Does not carry scopes. |
+| `PairStore` / `Peer` / `allow_peer` | Each device's `lan/devices.json` | Local authority for what that peer may do *here*. |
+| `Grant` / `grant_authorize` / `authorize_peer` | `pair_store.cpp`, `mesh_consent.cpp` | Semantic decision. `ask` → local prompt (`ConsentDlg` / `MeshConsentHost`). |
+| Mesh consent ticket | In-memory, after AllowOnce | Lets a matching op through until revision / expiry without another dialog. |
+| Dial book (`urls`, `tls_fp`, wrapped `dial_token`) | Phone announce → desktop `devices.json` (+ `peers.json` fallback) | How the desktop reaches the phone listener. |
+| Phone listener TLS pin | Phone `listener.key` / SPKI | Checked before bearer is sent (`phone_client` / `http_*` pin). |
+| Shared folder publish | Phone Shared folders + `phone_vfs_*` | Second action after `vfs` ≥ read. Jail is the mount. |
+| Places snapshot | `FilePanelSourceCatalog` / Android `FileBrowseModel` | UI cache of mounts + `can` + availability. |
+
+Direction reminder used by every diagram below:
+
+```text
+desktop.devices[phone].allow_peer  →  what the phone may do on the desktop
+phone.devices[desktop].allow_peer  →  what the desktop may do on the phone
+```
+
+Desktop → phone folder browse is gated by the **phone** row. Phone → desktop chat/audio is gated by the **desktop** row.
+
+#### Overview (user story)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Desk as Desktop<br/>Settings / Places
+    participant Node as Desktop node<br/>lan_win Service
+    participant Phone as Phone app
+    participant PL as Phone listener<br/>PeerListener
+
+    User->>Desk: Pair phone (QR / paste link)
+    Desk->>Node: open_pairing → PairingTicket
+    Node-->>Desk: QR (pin + tp1_ secret)
+    User->>Phone: Scan / open tanit://pair…
+    Phone->>Node: POST /v1/lan/pair (secret + pin check)
+    Node-->>Phone: tn1_ token + desktop id
+    Note over Node,Phone: Both sides store a Peer row.<br/>allow_peer starts all off.
+
+    User->>Desk: Devices → Folder access Read/Write<br/>(desktop resources for the phone)
+    User->>Phone: Paired devices → vfs + networks<br/>(phone resources for the desktop)
+    User->>Phone: Shared folders → publish mounts
+    Phone->>PL: start / listen
+    Phone->>Node: POST /v1/lan/phone-vfs<br/>(urls, tls_fp, dial_token)
+    Node-->>Desk: dial book updated
+
+    User->>Desk: Places → open vfs://phone-…/mount
+    Desk->>PL: GET /v1/vfs/list|read|… (pinned TLS + bearer)
+    PL-->>Desk: entries + can[]
+    opt write grant
+        Desk->>PL: POST mkdir / move / delete<br/>PUT write
+    end
+```
+
+#### Detailed: computer QR pair (ticket → token → rows)
+
+Computer QR is the common desktop↔phone path. The ticket only authorizes the confirm. Settings (and phone Paired devices) turn grants on later.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant UI as Desktop UI<br/>tray / Settings
+    participant Svc as lan_win::Service
+    participant StoreD as Desktop PairStore<br/>devices.json
+    participant App as Phone<br/>LanPair / PairingCode
+    participant StoreP as Phone PairStore<br/>devices.json
+    participant Remember as nativeLanRememberPeer
+
+    User->>UI: Show pair code
+    UI->>Svc: open_pairing(scopes ignored for grant)
+    Svc->>Svc: mint PairingTicket (tp1_, TTL, pin)
+    Svc-->>UI: QR / tanit://pair… (TLS pin + secret)
+
+    User->>App: Scan or paste
+    App->>App: verify advertised pin before POST
+    App->>Svc: POST /v1/lan/pair {secret, device id/name}
+    alt bad secret / lockout
+        Svc-->>App: 401 / locked
+    else ok
+        Svc->>StoreD: ensure_peer + token_sha256(tn1_)<br/>allow_peer all off, revision 1
+        Svc-->>App: {token tn1_, host id, urls…}
+        App->>Remember: write peer row (urls, pin, wrapped dial_token)
+        App->>StoreP: Peer for desktop (trust=paired, grants off)
+        App->>App: also save lan-agent profile<br/>(api_key = tn1_, pair_id = host)
+        Note over StoreD,StoreP: Pairing grants nothing.<br/>Token identifies; Grant authorizes.
+    end
+```
+
+Classes: `Service::open_pairing` / `reveal_qr` (`lan_win.cpp`), `PairStore::ensure_peer` / `authorize`, `LanPair.kt`, `jni` `nativeLanRememberPeer`, phone `PairStore` via settings JNI.
+
+#### Detailed: turn on folder access and announce
+
+Two independent edits. The desktop grants what the phone may use on the PC. The phone grants what the PC may use on the phone, and must publish mounts + networks before announce carries addresses.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant DevUI as Desktop Settings<br/>PairedDevicesCard
+    participant Rpc as settingsDevicesGrant
+    participant StoreD as Desktop PairStore
+    participant PhoneUI as Phone<br/>PhoneSharedFolders
+    participant StoreP as Phone PairStore
+    participant PV as PhoneVfsService / PhoneVfs.kt
+    participant PL as PeerListener
+    participant Node as Desktop<br/>POST /v1/lan/phone-vfs
+
+    User->>DevUI: Folder access Off/Read/Write<br/>Audio/Video/Chat/Tools Off/Ask/On
+    DevUI->>Rpc: settingsDevicesGrant
+    Rpc->>StoreD: set_caps / vfs level + revisions
+    Note over StoreD: Gates phone→desktop /v1/vfs and /v1/audio…
+
+    User->>PhoneUI: Paired device → vfs + networks
+    PhoneUI->>StoreP: nativeLanSetGrant (vfs, networks)
+    User->>PhoneUI: Share at least one folder
+    PhoneUI->>PV: sync / hold
+    PV->>PL: phone_vfs_listen (TLS + /v1/vfs/*)
+    PV->>Node: POST /v1/lan/phone-vfs<br/>Authorization: Bearer tn1_
+    Node->>Node: require_v1_auth (pair token)<br/>store urls, tls_fp, wrapped dial_token<br/>on devices.json (+ peers.json dial book)
+    Node-->>PV: 200 {token: held|missing}
+    Note over StoreD: Dial-book watch → RefreshPhoneMounts.
+```
+
+Announce is dial material only. The desktop accepts it from a paired token; it does not raise grants. The phone still refuses `/v1/vfs/*` until **its** `allow_peer.vfs` for this computer is read or write (and the client arrives on an allowed network).
+
+#### Detailed: desktop opens a phone folder (Places → list/read)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Places as FilePanelSourceCatalog
+    participant Peers as phone_peers.hpp
+    participant Client as phone_client / vfs::Client
+    participant PL as Phone listener
+    participant Gate as grant_authorize<br/>authorize_peer
+    participant Store as Phone PairStore
+    participant Vfs as register_llm_vfs_routes<br/>pm::vfs::Store
+
+    User->>Places: Open Places / refresh
+    Places->>Peers: peers() (devices.json, peers.json fallback)
+    Places->>Client: GET /v1/vfs/mounts (per phone)
+    Client->>Client: route_for: /health with pin<br/>then bearer GET
+    Client->>PL: GET /v1/vfs/mounts
+    PL->>Gate: vfs / list (or read)
+    Gate->>Store: allow_peer.vfs level + networks + resources
+    alt off / wrong network / ask→Deny
+        PL-->>Client: 403 EGRANT / ENETWORK (+ vfs_revision)
+        Client->>Peers: note_grant (cache hint)
+    else allowed
+        PL->>Vfs: visible mounts
+        PL-->>Client: mounts[] + can[]
+        Places-->>User: device section + mount rows<br/>vfs://phone-id/mount
+    end
+
+    User->>Places: Open mount
+    Places->>Client: list / read / mkdir / …
+    Client->>PL: /v1/vfs/list|stat|read|write|mkdir|move|delete
+    PL->>Gate: capability + operation
+    opt level=ask
+        Gate->>Gate: ConsentDlg / MeshConsentHost
+        Gate->>Gate: mesh consent ticket (AllowOnce)<br/>or persist* into PairStore
+    end
+    PL->>Vfs: jail + op
+    PL-->>Client: JSON / bytes + can
+```
+
+UI ops from the file panel: `fsmkdir` / `fstouch` / `fsrename` → `ops::ensure_dir` / `create_empty_file` / `rename_uri`; delete → `RemoteVfsFolderModel::DeleteUris` → `ops::remove_uri` → `phone::remove`.
+
+#### Detailed: ask consent (one capability)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Caller as Peer (phone or desktop)
+    participant Route as HTTP route<br/>/v1/audio|vfs|…
+    participant Auth as Service::authorize<br/>or listener guard
+    participant AP as authorize_peer
+    participant GA as grant_authorize
+    participant Prompt as ConsentDlg<br/>or MeshConsentHost
+    participant Store as PairStore
+
+    Caller->>Route: request + Bearer tn1_
+    Route->>Auth: need_scope = capability
+    Auth->>Store: find peer by token hash
+    Auth->>AP: (store, peer, cap, op, resource)
+    AP->>GA: allow_peer
+    alt Allow
+        GA-->>Auth: Allow
+    else Deny (off)
+        GA-->>Auth: Deny → 403
+    else Ask
+        AP->>AP: mesh_consent_ticket_allows?
+        alt ticket hit
+            AP-->>Auth: Allow
+        else
+            AP->>Prompt: MeshConsentRequest
+            Prompt-->>AP: Deny | AllowOnce | Persist*
+            opt Persist*
+                AP->>Store: apply_mesh_consent_persist
+            end
+            opt AllowOnce
+                AP->>AP: remember consent ticket
+            end
+        end
+    end
+    Auth-->>Route: scopes / LlmVfsAccess
+    Route-->>Caller: 200 or 403 EASK/EGRANT
+```
+
+Default without a UI prompt is Deny (headless / CLI). Desktop Settings Devices exposes Off / Ask / On for audio, video, chat, and tools; folder access is Off / Read / Write (ask for vfs is via `authorize_peer` when level is ask).
+
+#### Class map (call chain)
+
+```text
+Pair / ticket
+  Desktop UI → lan_win::Service::open_pairing / reveal_qr
+            → PairStore::ensure_peer (confirm)
+  Phone     → LanPair.kt → POST /v1/lan/pair
+            → nativeLanRememberPeer → PairStore row + lan-agent profile
+
+Grant edit
+  Desktop   → PairedDevicesCard → settingsDevicesGrant → PairStore::set_caps
+  Phone     → PhoneSharedFolders → nativeLanSetGrant (vfs + networks)
+
+Announce / dial book
+  Phone     → PhoneVfsService → PeerListener + POST /v1/lan/phone-vfs
+  Desktop   → lan handler updates Peer urls/tls_fp/dial_token
+            → FilePanelSourceCatalog dial-book watch → RefreshPhoneMounts
+
+VFS serve (phone)
+  PeerListener → listener.cpp authorize → grant_authorize / authorize_peer
+              → node-features/vfs/vfs.cpp → pm::vfs::Store (jail)
+
+VFS call (desktop)
+  Places / cp / fsmkdir…
+    → phone_peers (dial) → phone_client (pinned HTTP)
+    → ops::ensure_dir|create_empty_file|remove_uri|rename_uri|copy_file
+    → RemoteVfsFolderModel (panel) / vfs::Client (shared)
+```
+
 ## 3. Band-aids and drifts
 
 These are the places a second book, a dead flag, or an old name is doing the job the pair row was meant to do.
@@ -389,7 +638,7 @@ Rows 1–6 in `tanit-mesh.md` §11 are done. These are the gaps this map still s
 | 10 | `FilePanelLocationMenu` appends `Devices` twice | done | Second append removed. Device sections are listed once |
 | 11 | Windows refreshes phone mounts for the next open only | done | `WM_FILEPANEL_PLACES_READY` rebuilds an open Places view |
 | 12 | Windows labels encode offline state and device name | done | Device name is the section. Mount title is clean. Offline is presentation only |
-| 13 | Windows remote rows expose only Open/Download | done | `/v1/vfs/mounts` and `/v1/vfs/list` return `can` (`list`, `stat`, `read`, and with write `write`, `mkdir`, `move`, `delete`). `phone_client` narrows it to the routes the client has (`list`, `stat`, `read`), `pm::vfs::List::can` carries it, and `CapabilitiesFromCan` (`PlaceDescriptor.hpp`) builds `FilePanelItemCapability` in `RemoteVfsFolderModel` and Places rows. A phone `write` does not become Upload until the client has a write route |
+| 13 | Windows remote rows expose only Open/Download | done | `/v1/vfs/mounts` and `/v1/vfs/list` return `can` (`list`, `stat`, `read`, and with write `write`, `mkdir`, `move`, `delete`). `phone_client` routes those ops (`mkdir`, `write`/`touch`, `move`/`rename`, `delete`) and keeps them in `can`; `ensure_dir` / `create_empty_file` / `remove_uri` / `rename_uri` and `RemoteVfsFolderModel::DeleteUris` use them. `CapabilitiesFromCan` maps write→Upload, move→Rename, delete→Delete. Covered by `tanit-cli test-core phone-vfs` when the phone grant is `write` |
 | 14 | Android and Windows Places models diverge | partial | Windows has the formal descriptor header (`PlaceDescriptor.hpp`: `Place`, `PlaceKind`, `PlaceGroupKind`, `PlaceAvailability`) and `FilePanelSource` carries `id`, `groupKind`, `groupId`, `detail`, `capabilities`, with `ToPlace`. Android `PlaceRow` mirrors `deviceId`, `availability`, `action`. Open: one shared C++ type for both platforms, `groupKind` and `detail` on Android, and an Android "No shared folders" / offline state from the same snapshot |
 | 15 | `AddPhonePicturePlaces` obsolete name | done | Renamed to `AddPairedDevicePlaces` |
 | 16 | `Grant` is a closed struct | done | PairStore version 3 writes nested `allow_peer`. Unknown capabilities round-trip |
