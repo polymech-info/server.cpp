@@ -1902,6 +1902,11 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
 
 bool Service::authorize(const std::string& token, DeviceAuth& out)
 {
+    return authorize(token, out, {});
+}
+
+bool Service::authorize(const std::string& token, DeviceAuth& out, std::string_view need_scope)
+{
     out = {};
     if (!impl_ || token.size() < 8)
         return false;
@@ -1923,33 +1928,50 @@ bool Service::authorize(const std::string& token, DeviceAuth& out)
         }
         out.id = d.id;
         out.name = d.name;
-        // `ask` runs the installed mesh consent prompt (default Deny). A
-        // Persist* answer rewrites the pair row before scopes are projected.
-        {
+        out.scopes = pm::lan::grant_scopes(d.allow_peer);
+        // `ask` → ConsentDlg (or installed prompt). Only the needed scope is
+        // prompted so an audio call does not also ask for folders.
+        // authorize() with no scope still resolves vfs ask (folder routes).
+        const std::string scope = need_scope.empty() ? std::string("files") : std::string(need_scope);
+        const char* capability = nullptr;
+        const char* operation = "start";
+        if (scope == "files") {
+            capability = pm::lan::k_cap_vfs;
+            operation = "read";
+        } else if (scope == "audio") {
+            capability = pm::lan::k_cap_audio_capture;
+        } else if (scope == "video") {
+            capability = pm::lan::k_cap_video_capture;
+        } else if (scope == "chat") {
+            capability = pm::lan::k_cap_chat_turn;
+            operation = "turn";
+        } else if (scope == "tools") {
+            capability = pm::lan::k_cap_tools_call;
+            operation = "call";
+        }
+        if (capability && std::find(out.scopes.begin(), out.scopes.end(), scope) == out.scopes.end()) {
             pm::lan::PairStore store(impl_->devices_path, static_cast<std::size_t>(k_max_devices));
-            if (pm::lan::authorize_peer(&store, d, pm::lan::k_cap_vfs, "read", "")
+            const int revision = pm::lan::grant_capability_revision(d.allow_peer, capability);
+            if (pm::lan::authorize_peer(&store, d, capability, operation, "")
                 == pm::lan::Decision::Allow) {
-                // Keep the in-memory row in sync when Persist* edited the file.
                 for (auto& row : impl_->devices) {
                     if (row.id == d.id) {
                         row = d;
                         break;
                     }
                 }
+                out.scopes = pm::lan::grant_scopes(d.allow_peer);
+                if (std::find(out.scopes.begin(), out.scopes.end(), scope) == out.scopes.end())
+                    out.scopes.push_back(scope);
+            } else if (pm::lan::mesh_consent_ticket_allows(d.id, capability, operation, "",
+                                                           revision)) {
+                out.scopes.push_back(scope);
             }
         }
-        out.scopes = pm::lan::grant_scopes(d.allow_peer);
         out.write = pm::lan::grant_authorize(d.allow_peer, pm::lan::k_cap_vfs, "write", "")
                         == pm::lan::Decision::Allow
                     || pm::lan::mesh_consent_ticket_allows(d.id, pm::lan::k_cap_vfs, "write", "",
                                                           d.allow_peer.vfs_revision);
-        // AllowOnce for read still needs `files` in the flat scope list the
-        // gate consumes.
-        if (pm::lan::mesh_consent_ticket_allows(d.id, pm::lan::k_cap_vfs, "read", "",
-                                                d.allow_peer.vfs_revision)) {
-            if (std::find(out.scopes.begin(), out.scopes.end(), "files") == out.scopes.end())
-                out.scopes.emplace_back("files");
-        }
         out.revision = d.allow_peer.revision;
         if (!pm::lan::grant_resources(d.allow_peer, pm::lan::k_cap_vfs).empty()) {
             out.mount_allowed = [grant = d.allow_peer](std::string_view mount) {
@@ -1977,6 +1999,10 @@ std::vector<DeviceInfo> Service::devices()
         info.name = d.name;
         info.scopes = pm::lan::grant_scopes(d.allow_peer);
         info.vfs = pm::lan::vfs_grant_name(d.allow_peer.vfs);
+        info.audio = d.allow_peer.audio.empty() ? "off" : d.allow_peer.audio;
+        info.video = d.allow_peer.video.empty() ? "off" : d.allow_peer.video;
+        info.chat = d.allow_peer.chat.empty() ? "off" : d.allow_peer.chat;
+        info.tools = d.allow_peer.tools.empty() ? "off" : d.allow_peer.tools;
         info.revision = d.allow_peer.revision;
         info.created = d.created;
         info.last_seen = d.last_seen;
@@ -2016,6 +2042,10 @@ bool list_paired_device_infos(std::vector<DeviceInfo>& out, std::string& err)
         info.name = d.name;
         info.scopes = pm::lan::grant_scopes(d.allow_peer);
         info.vfs = pm::lan::vfs_grant_name(d.allow_peer.vfs);
+        info.audio = d.allow_peer.audio.empty() ? "off" : d.allow_peer.audio;
+        info.video = d.allow_peer.video.empty() ? "off" : d.allow_peer.video;
+        info.chat = d.allow_peer.chat.empty() ? "off" : d.allow_peer.chat;
+        info.tools = d.allow_peer.tools.empty() ? "off" : d.allow_peer.tools;
         info.revision = d.allow_peer.revision;
         info.created = d.created;
         info.last_seen = d.last_seen;
@@ -2249,6 +2279,14 @@ bool revoke_paired_device(const std::string& id, std::string& err)
 bool set_paired_device_grant(const std::string& id, const std::string& vfs, bool audio, bool video,
                              bool chat, bool tools, std::string& err)
 {
+    return set_paired_device_grant(id, vfs, audio ? "on" : "off", video ? "on" : "off",
+                                   chat ? "on" : "off", tools ? "on" : "off", err);
+}
+
+bool set_paired_device_grant(const std::string& id, const std::string& vfs, const std::string& audio,
+                             const std::string& video, const std::string& chat,
+                             const std::string& tools, std::string& err)
+{
     if (!device_id_ok(id)) {
         err = "device id is empty or not usable";
         return false;
@@ -2269,7 +2307,8 @@ bool set_paired_device_grant(const std::string& id, const std::string& vfs, bool
             err = "no paired device with that id";
         return false;
     }
-    logger::info(std::string("lan pair: grant ") + id + " vfs=" + pm::lan::vfs_grant_name(grant));
+    logger::info(std::string("lan pair: grant ") + id + " vfs=" + pm::lan::vfs_grant_name(grant)
+                 + " audio=" + audio);
     return true;
 }
 

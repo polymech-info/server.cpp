@@ -43,6 +43,7 @@ PairError Service::complete_pairing(const std::string&, const std::string&, cons
 }
 
 bool Service::authorize(const std::string&, DeviceAuth&) { return false; }
+bool Service::authorize(const std::string&, DeviceAuth&, std::string_view) { return false; }
 std::vector<DeviceInfo> Service::devices() { return {}; }
 bool Service::revoke(const std::string&, std::string& err)
 {
@@ -61,6 +62,19 @@ bool list_paired_device_infos(std::vector<DeviceInfo>&, std::string& err)
     return false;
 }
 bool revoke_paired_device(const std::string&, std::string& err)
+{
+    err = k_unsupported;
+    return false;
+}
+bool set_paired_device_grant(const std::string&, const std::string&, bool, bool, bool, bool,
+                             std::string& err)
+{
+    err = k_unsupported;
+    return false;
+}
+bool set_paired_device_grant(const std::string&, const std::string&, const std::string&,
+                             const std::string&, const std::string&, const std::string&,
+                             std::string& err)
 {
     err = k_unsupported;
     return false;

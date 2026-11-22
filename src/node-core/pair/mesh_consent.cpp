@@ -115,12 +115,20 @@ bool apply_mesh_consent_persist(const PairStore& store, Peer& peer, const MeshCo
         err = "that consent answer does not fit this capability";
         return false;
     }
-    const bool audio = ask.capability == k_cap_audio_capture ? true : peer.allow_peer.audio == "on";
-    const bool video = ask.capability == k_cap_video_capture ? true : peer.allow_peer.video == "on";
-    const bool chat = ask.capability == k_cap_chat_turn ? true : peer.allow_peer.chat == "on";
-    const bool tools = ask.capability == k_cap_tools_call ? true : peer.allow_peer.tools == "on";
-    if (ask.capability != k_cap_audio_capture && ask.capability != k_cap_video_capture
-        && ask.capability != k_cap_chat_turn && ask.capability != k_cap_tools_call) {
+    // Keep other caps as stored (including `ask`). Only the answered one becomes on.
+    std::string audio = peer.allow_peer.audio.empty() ? "off" : peer.allow_peer.audio;
+    std::string video = peer.allow_peer.video.empty() ? "off" : peer.allow_peer.video;
+    std::string chat = peer.allow_peer.chat.empty() ? "off" : peer.allow_peer.chat;
+    std::string tools = peer.allow_peer.tools.empty() ? "off" : peer.allow_peer.tools;
+    if (ask.capability == k_cap_audio_capture)
+        audio = "on";
+    else if (ask.capability == k_cap_video_capture)
+        video = "on";
+    else if (ask.capability == k_cap_chat_turn)
+        chat = "on";
+    else if (ask.capability == k_cap_tools_call)
+        tools = "on";
+    else {
         err = "unknown capability for persist";
         return false;
     }

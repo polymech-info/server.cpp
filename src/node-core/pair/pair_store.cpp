@@ -1102,7 +1102,37 @@ bool PairStore::set_grant(std::string_view id, VfsGrant vfs, const std::vector<s
 bool PairStore::set_caps(std::string_view id, VfsGrant vfs, bool audio, bool video, bool chat,
                          bool tools, Peer& out, std::string& err) const
 {
-    auto flag = [](bool on) { return on ? std::string("on") : std::string("off"); };
+    return set_caps(id, vfs, audio ? "on" : "off", video ? "on" : "off", chat ? "on" : "off",
+                    tools ? "on" : "off", out, err);
+}
+
+bool PairStore::set_caps(std::string_view id, VfsGrant vfs, std::string_view audio,
+                         std::string_view video, std::string_view chat, std::string_view tools,
+                         Peer& out, std::string& err) const
+{
+    auto normalize = [](std::string_view level, std::string& out_level, std::string& err_out) {
+        if (level == "on" || level == "use") {
+            out_level = "on";
+            return true;
+        }
+        if (level == "ask") {
+            out_level = "ask";
+            return true;
+        }
+        if (level.empty() || level == "off") {
+            out_level = "off";
+            return true;
+        }
+        err_out = "capability level is off, ask, or on";
+        return false;
+    };
+    std::string audio_flag;
+    std::string video_flag;
+    std::string chat_flag;
+    std::string tools_flag;
+    if (!normalize(audio, audio_flag, err) || !normalize(video, video_flag, err)
+        || !normalize(chat, chat_flag, err) || !normalize(tools, tools_flag, err))
+        return false;
     std::lock_guard<std::mutex> lock(store_mutex());
     std::vector<Peer> rows;
     std::string identity;
@@ -1113,10 +1143,6 @@ bool PairStore::set_caps(std::string_view id, VfsGrant vfs, bool audio, bool vid
         err = "this device is not paired";
         return false;
     }
-    const std::string audio_flag = flag(audio);
-    const std::string video_flag = flag(video);
-    const std::string chat_flag = flag(chat);
-    const std::string tools_flag = flag(tools);
     const bool same = row->allow_peer.vfs == vfs && row->allow_peer.audio == audio_flag
                       && row->allow_peer.video == video_flag && row->allow_peer.chat == chat_flag
                       && row->allow_peer.tools == tools_flag;
@@ -1133,22 +1159,22 @@ bool PairStore::set_caps(std::string_view id, VfsGrant vfs, bool audio, bool vid
     }
     if (grant.audio != audio_flag) {
         ++grant.audio_revision;
-        if (!audio)
+        if (audio_flag == "off")
             dropped.emplace_back("audio");
     }
     if (grant.video != video_flag) {
         ++grant.video_revision;
-        if (!video)
+        if (video_flag == "off")
             dropped.emplace_back("video");
     }
     if (grant.chat != chat_flag) {
         ++grant.chat_revision;
-        if (!chat)
+        if (chat_flag == "off")
             dropped.emplace_back("chat");
     }
     if (grant.tools != tools_flag) {
         ++grant.tools_revision;
-        if (!tools)
+        if (tools_flag == "off")
             dropped.emplace_back("tools");
     }
     grant.vfs = vfs;

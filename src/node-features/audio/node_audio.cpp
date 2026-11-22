@@ -193,7 +193,7 @@ void register_audio_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
             if (g_lan) {
                 lan::DeviceAuth dev;
                 for (const auto& secret : request_secrets(req)) {
-                    if (!g_lan->authorize(secret, dev) || !dev.has("audio"))
+                    if (!g_lan->authorize(secret, dev, "audio") || !dev.has("audio"))
                         continue;
                     pair_token = secret;
                     session = std::make_shared<pm::node::LiveSession>(dev.id, "audio", 0);
@@ -213,7 +213,7 @@ void register_audio_routes(httplib::Server& svr, const AuthFn& require_v1_auth)
                     if (session && g_lan && now - *checked > std::chrono::seconds(2)) {
                         *checked = now;
                         lan::DeviceAuth dev;
-                        if (!g_lan->authorize(pair_token, dev) || !dev.has("audio")) {
+                        if (!g_lan->authorize(pair_token, dev, "audio") || !dev.has("audio")) {
                             sink.done();
                             return false;
                         }

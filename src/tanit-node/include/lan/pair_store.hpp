@@ -247,6 +247,11 @@ public:
     /// Replaces vfs and the audio, video, chat, and tools switches. Networks stay.
     /// Each capability revision moves only when that capability changed. A
     /// capability that turns off cancels that peer's live calls for it.
+    /// Cap levels are `off`, `ask`, or `on`.
+    bool set_caps(std::string_view id, VfsGrant vfs, std::string_view audio, std::string_view video,
+                  std::string_view chat, std::string_view tools, Peer& out, std::string& err) const;
+
+    /// Bool form: true → `on`, false → `off`. Prefer the string overload for `ask`.
     bool set_caps(std::string_view id, VfsGrant vfs, bool audio, bool video, bool chat, bool tools,
                   Peer& out, std::string& err) const;
 

@@ -63,10 +63,42 @@ bool desktop_authorize(const pm::server::ListenOptions& options, const httplib::
         return false;
     }
     if (g_lan) {
+        const char* need = nullptr;
+        switch (grant) {
+        case pm::server::RouteGrant::Files:
+        case pm::server::RouteGrant::FilesOrTools:
+            need = "files";
+            break;
+        case pm::server::RouteGrant::Audio:
+            need = "audio";
+            break;
+        case pm::server::RouteGrant::Video:
+            need = "video";
+            break;
+        case pm::server::RouteGrant::Chat:
+        case pm::server::RouteGrant::ChatAndTools:
+            need = "chat";
+            break;
+        case pm::server::RouteGrant::Tools:
+            need = "tools";
+            break;
+        default:
+            break;
+        }
         for (const auto& secret : secrets) {
             lan::DeviceAuth dev;
-            if (!g_lan->authorize(secret, dev))
+            if (!(need ? g_lan->authorize(secret, dev, need) : g_lan->authorize(secret, dev)))
                 continue;
+            if (!pm::server::route_grant_allows(grant, dev.scopes)
+                && grant == pm::server::RouteGrant::FilesOrTools
+                && g_lan->authorize(secret, dev, "tools")
+                && pm::server::route_grant_allows(grant, dev.scopes))
+                return true;
+            if (!pm::server::route_grant_allows(grant, dev.scopes)
+                && grant == pm::server::RouteGrant::ChatAndTools
+                && g_lan->authorize(secret, dev, "tools")
+                && pm::server::route_grant_allows(grant, dev.scopes))
+                return true;
             if (!pm::server::route_grant_allows(grant, dev.scopes)) {
                 deny(res, 403, "this peer is not allowed to call that route",
                      "invalid_request_error", "insufficient_scope");
@@ -103,7 +135,7 @@ bool desktop_authorize_vfs(const pm::server::ListenOptions& options, const httpl
     if (g_lan) {
         for (const auto& secret : secrets) {
             lan::DeviceAuth dev;
-            if (!g_lan->authorize(secret, dev))
+            if (!g_lan->authorize(secret, dev, "files"))
                 continue;
             if (!dev.has("files")) {
                 res.status = 403;
