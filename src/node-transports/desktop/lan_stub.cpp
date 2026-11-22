@@ -65,5 +65,15 @@ bool revoke_paired_device(const std::string&, std::string& err)
     err = k_unsupported;
     return false;
 }
+bool discover_lan_peers(std::vector<LanSight>&, std::string& err)
+{
+    err = k_unsupported;
+    return false;
+}
+bool accept_pairing_link(const std::string&, std::string& err)
+{
+    err = k_unsupported;
+    return false;
+}
 
 } // namespace media_cli::lan

@@ -36,7 +36,11 @@
 #define SP_PROT_TLS1_3_SERVER 0x1000
 #endif
 
+#include "lan/mesh_consent.hpp"
+#include "lan/mesh_consent_ui_win.hpp"
 #include "lan/pair_store.hpp"
+#include "vfs/phone_peers.hpp"
+#include "vfs/peer_dial.hpp"
 #include "pm/node/sessions.hpp"
 #include "lan/tanit_lan.hpp"
 #include "lan/tanit_lan_qr.hpp"
@@ -395,7 +399,7 @@ bool import_ticket_file(const fs::path& path, std::string& err)
             }
             for (const auto& scope : item["scopes"]) {
                 if (!scope.is_string() ||
-                    !pm::lan::grant_set_scope(peer.outbound, scope.get<std::string>())) {
+                    !pm::lan::grant_set_scope(peer.allow_peer, scope.get<std::string>())) {
                     err = "paired devices file has a scope that is not valid";
                     return false;
                 }
@@ -1164,12 +1168,7 @@ bool reload_devices_unlocked(LanServiceImpl& impl, std::string& err)
         logger::warn("lan identity changed; revoking paired phones");
         for (auto& peer : peers) {
             peer.trust = pm::lan::Trust::Revoked;
-            peer.outbound.vfs = pm::lan::VfsGrant::Off;
-            peer.outbound.audio = "off";
-            peer.outbound.video = "off";
-            peer.outbound.chat = "off";
-            peer.outbound.tools = "off";
-            peer.outbound.networks.clear();
+            pm::lan::grant_clear(peer.allow_peer);
         }
         if (!store.write(impl.fingerprint, peers, err))
             return false;
@@ -1430,6 +1429,9 @@ bool Service::prepare(const std::string& display_name, std::string& err)
     err.clear();
     if (!impl_)
         return false;
+    // Mesh ask → ConsentDlg when an interactive desktop is present. Language
+    // follows appearance settings. Headless stays on the default Deny prompt.
+    pm::lan::ensure_win32_mesh_consent_prompt();
     std::lock_guard lock(impl_->mu);
     if (impl_->prepared)
         return true;
@@ -1838,28 +1840,35 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
             device.trust = pm::lan::Trust::Paired;
             device.created = iso_now();
             device.last_seen = device.created;
-            for (const auto& scope : granted) {
-                if (!pm::lan::grant_set_scope(device.outbound, scope)) {
-                    err = "the peer requested scopes this device did not offer";
-                    return PairError::Rejected;
-                }
-            }
+            // The ticket intersection only decides that this confirm is allowed.
+            // The stored grant stays off. Settings is what turns a grant on.
+            // A second confirm of the same id replaces that grant and moves
+            // the revision, so a peer keeping an older document applies this one.
+            pm::lan::Grant previous;
             bool updated = false;
-            for (auto& d : impl_->devices) {
-                if (d.id == id) {
-                    device.created = d.created.empty() ? device.created : d.created;
-                    device.urls = d.urls;
-                    device.dial_token = d.dial_token;
-                    device.tls_fp = pin_ok(peer_tls_fp) ? peer_tls_fp : d.tls_fp;
-                    device.peer_fp = d.peer_fp;
-                    device.outbound.networks = d.outbound.networks;
-                    device.outbound.revision = d.outbound.revision;
-                    d = device;
-                    updated = true;
-                    break;
-                }
+            for (const auto& d : impl_->devices) {
+                if (d.id != id)
+                    continue;
+                device.created = d.created.empty() ? device.created : d.created;
+                device.urls = d.urls;
+                device.dial_token = d.dial_token;
+                device.tls_fp = pin_ok(peer_tls_fp) ? peer_tls_fp : d.tls_fp;
+                device.peer_fp = d.peer_fp;
+                previous = d.allow_peer;
+                updated = true;
+                break;
             }
-            if (!updated) {
+            // Every capability revision follows the replaced row's.
+            if (updated)
+                pm::lan::grant_succeed(device.allow_peer, previous);
+            if (updated) {
+                for (auto& d : impl_->devices) {
+                    if (d.id == id) {
+                        d = device;
+                        break;
+                    }
+                }
+            } else {
                 if (pin_ok(peer_tls_fp))
                     device.tls_fp = peer_tls_fp;
                 impl_->devices.push_back(device);
@@ -1876,7 +1885,7 @@ PairError Service::complete_pairing(const std::string& secret, const std::string
             out.token = token;
             out.device_id = id;
             out.host_id = impl_->device_id;
-            out.scopes = granted;
+            out.scopes = pm::lan::grant_scopes(device.allow_peer);
             out.fingerprint = impl_->fingerprint;
             logger::info("lan pair: granted " + id + " (" + device.name + ")");
             return PairError::Ok;
@@ -1914,9 +1923,40 @@ bool Service::authorize(const std::string& token, DeviceAuth& out)
         }
         out.id = d.id;
         out.name = d.name;
-        out.scopes = pm::lan::grant_scopes(d.outbound);
-        out.write = d.outbound.vfs == pm::lan::VfsGrant::Write;
-        out.revision = d.outbound.revision;
+        // `ask` runs the installed mesh consent prompt (default Deny). A
+        // Persist* answer rewrites the pair row before scopes are projected.
+        {
+            pm::lan::PairStore store(impl_->devices_path, static_cast<std::size_t>(k_max_devices));
+            if (pm::lan::authorize_peer(&store, d, pm::lan::k_cap_vfs, "read", "")
+                == pm::lan::Decision::Allow) {
+                // Keep the in-memory row in sync when Persist* edited the file.
+                for (auto& row : impl_->devices) {
+                    if (row.id == d.id) {
+                        row = d;
+                        break;
+                    }
+                }
+            }
+        }
+        out.scopes = pm::lan::grant_scopes(d.allow_peer);
+        out.write = pm::lan::grant_authorize(d.allow_peer, pm::lan::k_cap_vfs, "write", "")
+                        == pm::lan::Decision::Allow
+                    || pm::lan::mesh_consent_ticket_allows(d.id, pm::lan::k_cap_vfs, "write", "",
+                                                          d.allow_peer.vfs_revision);
+        // AllowOnce for read still needs `files` in the flat scope list the
+        // gate consumes.
+        if (pm::lan::mesh_consent_ticket_allows(d.id, pm::lan::k_cap_vfs, "read", "",
+                                                d.allow_peer.vfs_revision)) {
+            if (std::find(out.scopes.begin(), out.scopes.end(), "files") == out.scopes.end())
+                out.scopes.emplace_back("files");
+        }
+        out.revision = d.allow_peer.revision;
+        if (!pm::lan::grant_resources(d.allow_peer, pm::lan::k_cap_vfs).empty()) {
+            out.mount_allowed = [grant = d.allow_peer](std::string_view mount) {
+                return pm::lan::grant_resource_allowed(grant, pm::lan::k_cap_vfs,
+                                                       "mount:" + std::string(mount));
+            };
+        }
         return true;
     }
     return false;
@@ -1935,9 +1975,9 @@ std::vector<DeviceInfo> Service::devices()
         DeviceInfo info;
         info.id = d.id;
         info.name = d.name;
-        info.scopes = pm::lan::grant_scopes(d.outbound);
-        info.vfs = pm::lan::vfs_grant_name(d.outbound.vfs);
-        info.revision = d.outbound.revision;
+        info.scopes = pm::lan::grant_scopes(d.allow_peer);
+        info.vfs = pm::lan::vfs_grant_name(d.allow_peer.vfs);
+        info.revision = d.allow_peer.revision;
         info.created = d.created;
         info.last_seen = d.last_seen;
         info.revoked = d.trust != pm::lan::Trust::Paired;
@@ -1974,15 +2014,170 @@ bool list_paired_device_infos(std::vector<DeviceInfo>& out, std::string& err)
         DeviceInfo info;
         info.id = d.id;
         info.name = d.name;
-        info.scopes = pm::lan::grant_scopes(d.outbound);
-        info.vfs = pm::lan::vfs_grant_name(d.outbound.vfs);
-        info.revision = d.outbound.revision;
+        info.scopes = pm::lan::grant_scopes(d.allow_peer);
+        info.vfs = pm::lan::vfs_grant_name(d.allow_peer.vfs);
+        info.revision = d.allow_peer.revision;
         info.created = d.created;
         info.last_seen = d.last_seen;
         info.revoked = d.trust != pm::lan::Trust::Paired;
         out.push_back(std::move(info));
     }
     return true;
+}
+
+namespace {
+
+std::string query_param(const std::string& query, const std::string& key)
+{
+    const std::string token = key + "=";
+    std::size_t at = 0;
+    while (at < query.size()) {
+        if (query.compare(at, token.size(), token) == 0) {
+            const std::size_t start = at + token.size();
+            const std::size_t end = query.find('&', start);
+            return query.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        }
+        const std::size_t next = query.find('&', at);
+        if (next == std::string::npos)
+            break;
+        at = next + 1;
+    }
+    return {};
+}
+
+std::string query_unquote(const std::string& in)
+{
+    std::string out;
+    out.reserve(in.size());
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '%' && i + 2 < in.size()) {
+            auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9')
+                    return c - '0';
+                if (c >= 'a' && c <= 'f')
+                    return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F')
+                    return c - 'A' + 10;
+                return -1;
+            };
+            const int hi = hex(in[i + 1]);
+            const int lo = hex(in[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>(hi * 16 + lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(in[i] == '+' ? ' ' : in[i]);
+    }
+    return out;
+}
+
+bool self_lan_id(std::string& id, std::string& pin, std::string& name, std::string& err)
+{
+    const fs::path dir = config_lan_dir(err);
+    if (dir.empty())
+        return false;
+    const fs::path path = dir / "identity.json";
+    std::string text;
+    if (read_text_file(path, text)) {
+        const auto parsed = media::json::try_parse(text);
+        if (parsed.is_object()) {
+            id = parsed.value("id", std::string{});
+            pin = parsed.value("fingerprint", std::string{});
+        }
+    }
+    name = wide_to_utf8(computer_name_w());
+    if (name.empty())
+        name = "Tanit";
+    bool ok = id.size() == 16;
+    for (unsigned char c : id) {
+        if (!ok)
+            break;
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            ok = false;
+    }
+    if (ok) {
+        err.clear();
+        return true;
+    }
+    std::uint8_t raw[8];
+    if (!random_bytes(raw, sizeof raw)) {
+        err = "could not assign a device id";
+        return false;
+    }
+    id = media::strutil::to_hex(raw, sizeof raw);
+    const nlohmann::json body{{"v", 1}, {"id", id}, {"fingerprint", pin}, {"created", ""}};
+    if (!write_text_file(path, body.dump(2), err))
+        return false;
+    err.clear();
+    return true;
+}
+
+} // namespace
+
+bool discover_lan_peers(std::vector<LanSight>& out, std::string& err)
+{
+    out.clear();
+    std::vector<media_cli::mdns::Sight> rows;
+    if (!media_cli::mdns::browse("_tanit._tcp", 1200, rows, err))
+        return false;
+    for (const auto& row : rows) {
+        LanSight sight;
+        sight.name = row.name;
+        sight.host = row.host;
+        sight.port = row.port;
+        sight.role = row.role.empty() ? "computer" : row.role;
+        out.push_back(std::move(sight));
+    }
+    err.clear();
+    return true;
+}
+
+bool accept_pairing_link(const std::string& link, std::string& err)
+{
+    err.clear();
+    if (link.compare(0, 12, "tanit://pair") != 0) {
+        err = "This pairing link is not valid";
+        return false;
+    }
+    const std::size_t qpos = link.find('?');
+    if (qpos == std::string::npos) {
+        err = "This pairing link is not valid";
+        return false;
+    }
+    const std::string query = link.substr(qpos + 1);
+    if (query_param(query, "v") != "1") {
+        err = "This pairing link is not supported";
+        return false;
+    }
+    const std::string host = query_unquote(query_param(query, "host"));
+    const int port = std::atoi(query_param(query, "port").c_str());
+    std::string pin = query_param(query, "fp");
+    pin.erase(std::remove(pin.begin(), pin.end(), ':'), pin.end());
+    for (char& c : pin) {
+        if (c >= 'A' && c <= 'F')
+            c = static_cast<char>(c - 'A' + 'a');
+    }
+    const std::string secret = query_param(query, "secret");
+    std::string peer_name = query_unquote(query_param(query, "name"));
+    if (host.empty() || host.find(' ') != std::string::npos || port < 1 || port > 65535
+        || pin.size() != 64 || secret.compare(0, 4, "tp1_") != 0) {
+        err = "This pairing link is not valid";
+        return false;
+    }
+    if (peer_name.empty())
+        peer_name = host;
+    std::string self_id;
+    std::string self_pin;
+    std::string self_name;
+    if (!self_lan_id(self_id, self_pin, self_name, err))
+        return false;
+    const std::string base = "https://" + host + ":" + std::to_string(port);
+    std::string peer_id;
+    long http = 0;
+    return pm::vfs::peer::pair_with(base, pin, self_id, self_name, self_pin, secret, peer_id, http, err,
+                                    peer_name);
 }
 
 bool list_paired_devices(std::string& text, std::string& err)
@@ -2011,7 +2206,7 @@ bool list_paired_devices(std::string& text, std::string& err)
         text += "\t";
         text += d.name;
         text += "\t";
-        const auto scopes = pm::lan::grant_scopes(d.outbound);
+        const auto scopes = pm::lan::grant_scopes(d.allow_peer);
         for (size_t i = 0; i < scopes.size(); ++i) {
             if (i)
                 text += ",";
@@ -2047,6 +2242,7 @@ bool revoke_paired_device(const std::string& id, std::string& err)
         return false;
     }
     logger::info("lan pair: revoked " + id);
+    pm::vfs::phone::forget_revoked_device(id);
     return true;
 }
 

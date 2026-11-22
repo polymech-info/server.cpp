@@ -15,7 +15,7 @@ A dialer uses a saved URL. On the desktop, the LAN proxy terminates TLS and mDNS
 
 ## Grants
 
-`PairStore` version 2 is `devices.json`. `outbound` is what this device allows that peer to do. Pairing itself grants nothing. A route that is off is not registered, so an unknown `/v1/` path is 404. A registered route the grant does not cover is 403. No credential is 401. A hop this process did not write is 400.
+`PairStore` version 3 is `devices.json`. `allow_peer` is what this device allows that peer to do (nested capability map: `vfs`, `audio.capture`, …). Pairing itself grants nothing. A route that is off is not registered, so an unknown `/v1/` path is 404. A registered route the grant does not cover is 403. No credential is 401. A hop this process did not write is 400.
 
 ## Features
 

@@ -25,6 +25,10 @@ struct ServerFeatures {
 inline ServerFeatures phone_features()
 {
     ServerFeatures features;
+    // The phone listener mounts lan and vfs only. Audio and video turn on when
+    // those routes are registered on the same listener.
+    features.audio = false;
+    features.video = false;
     features.video_control = false;
     features.llm = false;
     features.tools = false;
@@ -54,7 +58,10 @@ inline bool route_enabled(const ServerFeatures& features, std::string_view path)
         || path == "/v1/chat/commands/run" || path == "/v1/ui/open"
         || path == "/v1/realtime/cancel-agent")
         return features.tools;
-    if (path == "/v1/models" || path == "/v1/credit" || path.rfind("/v1/chat/", 0) == 0
+    // Preset list is a node surface. Completions stay behind llm.
+    if (path == "/v1/models")
+        return features.lan || features.llm;
+    if (path == "/v1/credit" || path.rfind("/v1/chat/", 0) == 0
         || path.rfind("/v1/speak", 0) == 0 || path.rfind("/v1/realtime/", 0) == 0
         || path == "/v1/chat/completions")
         return features.llm;

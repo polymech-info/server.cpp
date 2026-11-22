@@ -26,6 +26,10 @@ struct LlmVfsAccess {
     /// Re-read while a write is spilling. Empty means the caller has no pair
     /// row to go stale. False means stop and delete the partial file.
     std::function<bool()> still_granted;
+    /// Narrows the published mounts for this caller (the `vfs` capability's
+    /// `resources`). Empty means every mount. A mount it refuses is absent from
+    /// `/v1/vfs/mounts` and answers 404 everywhere else.
+    std::function<bool(std::string_view mount)> mount_allowed;
 };
 
 using LlmVfsAuthorize = std::function<bool(const httplib::Request&, httplib::Response&, LlmVfsAccess&)>;

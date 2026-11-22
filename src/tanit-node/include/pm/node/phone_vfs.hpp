@@ -50,6 +50,14 @@ bool phone_lan_set_grant(const std::string& profile_dir, const std::string& id, 
 
 bool phone_lan_revoke(const std::string& profile_dir, const std::string& id, std::string& err);
 
+/// Deletes the pair row. A missing id succeeds so the card can go away.
+bool phone_lan_forget(const std::string& profile_dir, const std::string& id, std::string& err);
+
+/// Dial for a paired peer whose folder access is read or write.
+/// @p json is `{url, pin, token, name}`. Callers must not log @p json.
+bool phone_lan_peer_dial(const std::string& profile_dir, const std::string& id, std::string& json,
+                         std::string& err);
+
 /// A revoked computer becomes paired again, with nothing granted.
 bool phone_lan_repair(const std::string& profile_dir, const std::string& id, std::string& err);
 
@@ -57,8 +65,12 @@ bool phone_lan_repair(const std::string& profile_dir, const std::string& id, std
 bool phone_lan_announce(const std::string& profile_dir, const std::string& id, const std::string& name,
                         bool rotate, std::string& json, std::string& err);
 
-/// Opens a pairing window and returns the QR modules. No secret leaves this JSON.
-std::string phone_lan_open_ticket(const std::string& profile_dir, const std::string& name);
+/// Opens a pairing window and returns the QR modules plus the `tanit://pair`
+/// link. The link is for the person at the phone to copy. Callers must not log it.
+/// An empty @p host uses Wi‑Fi, then the first other non-mobile address.
+/// A non-empty @p host must be one of those addresses.
+std::string phone_lan_open_ticket(const std::string& profile_dir, const std::string& name,
+                                  const std::string& host = "");
 
 void phone_lan_close_ticket();
 

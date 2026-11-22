@@ -306,8 +306,8 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
         }
 
         // Who is announcing. A paired device is known by its desktop pair id.
-        // A caller that used the serve key itself is the owner of this computer.
-        // @todo: server key as optional
+        // A caller that used the serve key is this computer. The phone's row
+        // is the authority in the body, which is the id stored at pairing.
         std::string owner = "serve-key";
         for (const auto& secret : request_secrets(req)) {
             lan::DeviceAuth dev;
@@ -333,20 +333,32 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
         }
         bool holds_token = false;
         std::string err;
-        if (owner != "serve-key" && !urls.empty()) {
+        if (!urls.empty()) {
             std::string sealed;
             if (!token.empty() && !pm::vfs::phone::seal_dial_token(token, sealed, err)) {
                 refuse(400, err.empty() ? "the phone token is not valid" : err);
                 return;
             }
-            pm::lan::Peer dialed;
+            // A pair token writes the caller's row. The serve key writes the
+            // phone's row, and only when that phone is already paired.
+            const std::string dial_id = owner == "serve-key" ? authority : owner;
             const auto devices = media::settings::get_config_dir() / "lan" / "devices.json";
-            if (!pm::lan::PairStore(devices, 64).set_dial(owner, name, urls, tls_fp, sealed, dialed, err)) {
-                const bool bad_input = err.find("not valid") != std::string::npos
-                                       || err.find("not usable") != std::string::npos
-                                       || err.find("revoked") != std::string::npos;
-                refuse(bad_input ? 400 : 500, err.empty() ? "could not store the phone" : err);
-                return;
+            bool write_dial = true;
+            if (owner == "serve-key") {
+                pm::lan::Peer existing;
+                std::string find_err;
+                write_dial = pm::lan::PairStore(devices, 64).find(dial_id, existing, find_err)
+                             && existing.trust == pm::lan::Trust::Paired;
+            }
+            if (write_dial) {
+                pm::lan::Peer dialed;
+                if (!pm::lan::PairStore(devices, 64).set_dial(dial_id, name, urls, tls_fp, sealed, dialed, err)) {
+                    const bool bad_input = err.find("not valid") != std::string::npos
+                                           || err.find("not usable") != std::string::npos
+                                           || err.find("revoked") != std::string::npos;
+                    refuse(bad_input ? 400 : 500, err.empty() ? "could not store the phone" : err);
+                    return;
+                }
             }
         }
         if (!pm::vfs::phone::store_peer(authority, name, urls, token, tls_fp, owner, holds_token, err)) {

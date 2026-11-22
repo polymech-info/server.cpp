@@ -1,8 +1,8 @@
 # Tanit mesh
 
-**Date:** 2026-11-20  
-**Status:** the node, the pair row, and the dials are in. `tanit-cli node serve` is the listener with `llm` unmounted. `llm agent --serve` mounts the agent on the same gate. Desktop-to-desktop, phone-to-desktop, and phone-to-phone use one `PairStore` version 2 row. The phone listener terminates TLS. The desktop dials it with the certificate pin. What is still open is in section 11: E2EE for a file that a relay will hold, and the node when the tray or the built-in GUI starts it. That process still answers 401 and `invalid LAN hop`. The orchestrator suites do not start it.  
-**Reads with:** `packages/server.cpp/README.md` (module index), `packages/server.cpp/docs/node-today.md` (what compiles now), `android/vfs-next.md` (the phone-folder slice log and manual tests), `packages/llm.cpp/docs/llm-server.md` (the agent routes), `docs/phone-mesh.md` (the longer product sketch), `packages/encryption.cpp/docs/design.md`.
+**Date:** 2026-11-22  
+**Status:** the node, the pair row, and the dials are in. `tanit-cli node serve` is the listener with `llm` unmounted. `llm agent --serve` mounts the agent on the same gate. Desktop-to-desktop, phone-to-desktop, and phone-to-phone use one `PairStore` version 3 row (`allow_peer`). The phone listener terminates TLS. The desktop dials it with the certificate pin. What is still open is in section 11: E2EE for a file that a relay will hold, and the node when the tray or the built-in GUI starts it. That process still answers 401 and `invalid LAN hop`. The orchestrator suites do not start it. Live gaps and Places/capability work: `tanit-mesh-overview.md` §6.  
+**Reads with:** `packages/server.cpp/docs/tanit-mesh-overview.md` (what each platform actually serves and calls today), `packages/server.cpp/README.md` (module index), `packages/server.cpp/docs/node-today.md` (what compiles now), `android/vfs-next.md` (the phone-folder slice log and manual tests), `packages/llm.cpp/docs/llm-server.md` (the agent routes), `docs/phone-mesh.md` (the longer product sketch), `packages/encryption.cpp/docs/design.md`.
 
 A mesh peer is a node. It speaks the same routes, with a `vfs://` name for every shared folder and every live source. Either phone or a desktop can be the listener. Phone-to-phone uses the same pair record as phone-to-desktop. The LLM is one feature of that node. A build that leaves it out is still a node.
 
@@ -44,16 +44,22 @@ A row is one peer:
   "dial_token": "<wrapped tn1_ this device sends when it dials that listener>",
   "token_sha256": "<sha256 of the tn1_ token this peer presents when it dials us>",
   "trust": "paired",
-    "outbound": { "revision": 4, "vfs": "read", "audio": "off", "video": "off", "chat": "off", "tools": "off" },
-  "inbound":  { "revision": 2, "vfs": "read", "audio": "listen", "video": "off" },
+  "allow_peer": {
+    "vfs": { "revision": 4, "level": "read", "conditions": { "networks": ["192.168.1.0/24"] } },
+    "audio.capture": { "revision": 1, "level": "off" },
+    "video.capture": { "revision": 1, "level": "off" },
+    "chat.turn": { "revision": 1, "level": "off" },
+    "tools.call": { "revision": 1, "level": "off" }
+  },
+  "allow_peer_revision": 4,
   "created": "2026-11-17T12:00:00Z",
   "last_seen": "2026-11-17T12:04:11Z"
 }
 ```
 
-The file on disk is `{"version": 2, "identity", "devices"}`. `outbound` is what this device allows that peer to do. `vfs` is `off`, `read`, or `write`. `audio`, `video`, `chat`, and `tools` are `on` or `off`. This file is the authority for those resources. `inbound` in the sketch above is not written. A request is allowed only when the serving device's own `outbound` says so. `urls` and `dial_token` are how this device dials that peer. `dial_token` is wrapped. It is not `token_sha256`. Desktop-to-desktop stores both directions on this row. A phone announce stores the same fields on the caller's row. Places still opens a phone folder from `lan/peers.json`.
+The file on disk is `{"version": 3, "identity", "devices"}`. `allow_peer` is what this device allows that peer to do. `vfs.level` is `off`, `read`, `write`, or `ask`. Capture / turn / call caps use `use`, `off`, or `ask`. Version 1 and 2 files, and rows that still use `outbound`, are rejected. This file is the authority for those resources. `inbound` in older sketches is not written. A request is allowed only when the serving device's own `allow_peer` says so. `urls` and `dial_token` are how this device dials that peer. `dial_token` is wrapped. It is not `token_sha256`. Desktop-to-desktop stores both directions on this row. A phone announce stores the same fields on the caller's row. Places prefers dialable rows from `devices.json`; `lan/peers.json` is fallback.
 
-The token authenticates the peer. It does not carry the grant. `GET /v1/lan/grant` returns the caller's `outbound` row. The user edits grants on the device that owns the resource. That edit is local. There is no route a peer can call to raise what they are allowed to do.
+The token authenticates the peer. It does not carry the grant. `GET /v1/lan/grant` returns the caller's `allow_peer` (and flat `grant.*` for older clients). The user edits grants on the device that owns the resource. That edit is local. There is no route a peer can call to raise what they are allowed to do.
 
 Trust is `verifying`, `paired`, or `revoked`. An empty grant on a `paired` row means the peer is still paired and can refresh `GET /v1/lan/grant`. `revoked` rejects the token. Those are different states: a stolen token still follows later grant edits, and only revoke drops the hash.
 
@@ -87,7 +93,7 @@ Chat is not one of these three, and it is not a reason to link `encryption.cpp`.
 
 ### Revision
 
-Each outbound edit increments `revision`. The counter is the order. A wall-clock timestamp is not: a peer with a wrong clock must not restore an older `write` by replaying an announcement. The peer applies a grant document only when `revision` is greater than the cached one. The serving device does not consult that cache when it allows a request.
+Each capability keeps its own revision (`vfs_revision`, …). The row also keeps `allow_peer_revision` as the whole-document generation. A wall-clock timestamp is not the order: a peer with a wrong clock must not restore an older `write` by replaying an announcement. Folder clients cache the vfs revision (`vfs_revision`), not the generation. The serving device does not consult that cache when it allows a request.
 
 `Room.grants` in `pm::room` is a different mechanism and a known stand-in. `join` ORs invite bits into one room field, in memory, and nothing re-signs the room. `Broker::post` ignores the bits. `invite` rejects `k_grant_files`. A mesh host must not use that field as the pair grant. The pair row is per peer, it can narrow, and the device that owns the microphone enforces it.
 
@@ -321,7 +327,7 @@ A peer that presents a token whose hash matches a `revoked` row gets 401. A peer
 |---|---|---|
 | 1 | Feature struct on `AgentServerOptions`. Desktop serve with no override keeps today's routes | Done. A feature that is off answers 404 before the handler. An unknown `/v1/` path is 404. It is not `llm` |
 | 2 | Keep the device id as a label, and record the TLS pin of the peer's listener in the same pair row. No second pairing protocol. A long-term device key waits until Windows and Android can both hold one | The id stays a label. The desktop dial book stores the phone pin. The phone's row for the desktop pin waits on the QR exchange. No second pairing protocol. Ed25519 is not assumed |
-| 3 | Move scope checks for `files`, `audio`, and `video` off the frozen ticket and onto `outbound`, so a desktop can narrow them without a re-pair. `chat` and `tools` stay as they are | Done. `PairStore` version 2 is the desktop file. `files` is vfs write. `chat` and `tools` are explicit `on`/`off` capabilities |
+| 3 | Move scope checks for `files`, `audio`, and `video` off the frozen ticket and onto `allow_peer`, so a desktop can narrow them without a re-pair. `chat` and `tools` stay as they are | Done. `PairStore` version 3 is the desktop file. `files` is vfs write. Caps are nested under `allow_peer` |
 | 4 | Phone listener with `llm`, `tools`, and `video_control` off. Grant, vfs mounts, `vfs://phone-<id>/...` | Done: `pm::node::PeerListener`, `PairStore`, per-network grants, TLS on the public port. `/health` has no authority. The phone id is random hex |
 | 5 | Desktop browser for that URI, dialing the phone with the token the phone issued | Done: Places, `cp`, `lan/peers.json`. The dial is pinned HTTPS. A wrong pin sends no token |
 | 6 | Phone-to-phone on the same LAN, same records | Done: the phone TLS client and the pair row. An announce stores that row. `test:phone-peer`. Places reads `lan/peers.json` |
@@ -477,13 +483,32 @@ The verb is `node`. `serve` is taken by the Drogon REST server (`src/cli/pm_imag
 
 ### What stays out
 
-`pm-encryption-lib` is not linked. `/v1/logs` stays in the agent layer (`node_logs.cpp`). On a plain node it is 404. The both-pin QR exchange stays parked. The desktop dial book stores the phone pin. The phone's row for the desktop listener pin is not filled by the current ticket QR. The tray starts the node; that process is the open fault in section 11.
+`pm-encryption-lib` is not linked. `/v1/logs` stays in the agent layer (`node_logs.cpp`). On a plain node it is 404. The both-pin QR exchange stays parked. The desktop dial book stores the phone pin. The phone's row for the desktop listener pin is not filled by the current ticket QR. The tray starts the node. Pairing starts from Settings or an explicit `node serve --pair`.
 
 ## 11. What is left
 
-Phases 1 through 4 and the pair-row half of phase 6 are in the tree. `PairStore` version 2 is the only pair file. `node serve` mounts lan, vfs, audio, and video when the binary has capture. The phone listener, the desktop dial, desktop-to-desktop, and phone-to-phone use that row. `peer_fp` stays empty. Both-pin QR exchange stays parked. `encryption.cpp` is not linked.
+Phases 1 through 4 and the pair-row half of phase 6 are in the tree. `PairStore` version 3 is the only pair file. `node serve` mounts lan, vfs, audio, and video when the binary has capture. The phone listener, the desktop dial, desktop-to-desktop, and phone-to-phone use that row. `peer_fp` stays empty. Both-pin QR exchange stays parked. `encryption.cpp` is not linked.
 
-Two things remain.
+Rows 1 through 6 are in the tree and covered by the suite on that row. E2EE stays after this list. The tray node no longer passes `--pair`.
+
+### Pair and grant todos
+
+The phone in these suites is `tanit-cli test core phone-listener`: the same listener the Android app runs, on loopback, with its own pair file. `lan-peer` is the edit the phone's Shared folders screen makes. `phone-post` sends an announce. `phone-dial` reads `/v1/vfs/mounts` the way Places does. No handset is required. `test:phone-peer` already stores an announce on the pair row when the bearer is the pair token. `test:vfs-phone` already narrows a grant and refuses a dial before a network is granted. `test:node-serve` announces with the pair token and with the serve key. Both write the pair row.
+
+Rows 1 through 6 are fixed. A network refusal names the current vfs, and a lower revision replaces the cache. Revoking a device drops the phone rows it announced and their Places cache. An unreachable phone stays in Places with `offline` on the label.
+
+| | Gap | Where | Done when | Suite |
+|---|---|---|---|---|
+| 1 done | A fresh pair on the phone stores `vfs=off` and no network. An announce then carries no address, and `phone-dial` does not open a socket. Shared folders turns on read and a network, and the announce carries one address | `peer_announce_json` in `listener.cpp` | A phone with `vfs=off` or an empty network list announces no `urls`. `phone-dial` does not open a socket. After `lan-peer grant` of read plus `127.0.0.0/8`, the announce carries one `https://127.0.0.1` url and mounts return 200 | `test:vfs-phone` |
+| 2 done | The phone calls `/v1/lan/phone-vfs` with the desktop serve key. That announce writes `urls`, `tls_fp`, and a wrapped dial token onto the phone's pair row and into `lan/peers.json`. A pair-token announce still writes the caller's row | `register_lan_routes` in `node_lan.cpp` | An announce with the serve key writes `urls`, `tls_fp`, and a wrapped dial token onto that phone's row in `devices.json`, and the same fields into `peers.json`. The plaintext `tn1_` is in neither file | `test:node-serve` |
+| 3 done | A new pair on the phone has an empty `token_sha256`. The desktop's old dial gets 401, the stored token is dropped, and the next announce carries a new token | `peer_announce_json` in `listener.cpp`. `drop_token` in `phone_peers.hpp` | Restart the phone listener on a new pair file, dial with the old token, expect 401, expect the stored dial token gone. The next announce body carries a new token. The following mounts call is 200 | `test:vfs-phone` |
+| 4 done | A second confirm of the same device id stores the empty grant at a higher revision. `authorize` returns that grant | `Service::complete_pairing` in `lan_win.cpp` | Pair the same device id twice. The second row's revision is greater. A grant that the second confirm replaced is the one `authorize` returns | `test:node-peer` |
+| 5 done | A fresh confirm matches section 3: revision 1, vfs off, audio off, video off, chat off, tools off. The ticket intersection only decides that the confirm is allowed. Settings is what turns a grant on | `complete_pairing` in `lan_win.cpp` | A fresh confirm matches section 3. A later Settings edit is what turns a grant on | `test:node-serve` |
+| 6 done | `note_grant` ignores a revision that is not greater than the cached one. A fresh phone pair at revision 1 leaves a cached `write` at revision 4 in place. An `ENETWORK` body named the revision and no vfs, so the cache kept the old vfs | `note_grant` in `phone_peers.hpp`. `admit` in `listener.cpp` | A smaller revision replaces the cache. The vfs value is the one in that document, and an empty vfs clears it. `ENETWORK` and the announce `EGRANT` include `vfs` | `test:vfs-phone` |
+
+Both-pin QR exchange stays parked and is not a row in this table.
+
+The Devices page is its own Settings section (`devices` in `apps/settings`). Folder access is one control: Off, Read, or Write. An enabled audio, video, chat, or tools box uses the primary fill. The page says this PC allows the device, and that phone folders are set on the phone. The pairing code lists the three steps after a confirm and does not list ticket scopes as grants. It needs `npm run build:settings:embed` and a desktop build before it shows.
 
 ### E2EE
 
@@ -496,7 +521,7 @@ Bytes that two paired peers exchange directly stay on authenticated TLS. E2EE is
 
 ### Tray and GUI node
 
-The agent row is `llm agent --serve` on port 8090. The node row is `node serve` on port 8092, TLS 8093 (`node_service()` in `src/cli/pm_image_cmd_tray.cpp`). A node row that omits `--port`, or that uses the agent's HTTP or TLS port, is rewritten to 8092 and 8093 the next time the tray reads `services.json`. The two listeners used to share 8090 and 8091. `SO_REUSEADDR` let both accept. A hop minted by one process then landed on the other, which is **400** `invalid LAN hop`. A bearer the other process does not hold is **401**.
+The agent row is `llm agent --serve` on port 8090. The node row is `node serve` on port 8092, TLS 8093 (`node_service()` in `src/cli/pm_image_cmd_tray.cpp`). It does not pass `--pair`. A stored node row that still has `--pair` or `--pair-scopes` loses both the next time the tray reads `services.json`. Pairing starts from Settings or from `node serve --pair`. A node row that omits `--port`, or that uses the agent's HTTP or TLS port, is rewritten to 8092 and 8093 on that same read. The two listeners used to share 8090 and 8091. `SO_REUSEADDR` let both accept. A hop minted by one process then landed on the other, which is **400** `invalid LAN hop`. A bearer the other process does not hold is **401**.
 
 A process that is still alive is the same failure. `run_desktop` asks IPC before it binds. `list_instances()` already drops a dead pid. A live `node` or `llm-agent` whose label ends in `:<port>` makes the new process exit with `already served by`. It does not bind over the leftover. The tray's own start check uses that same IPC list. Restart the tray after this build so the node that is still on 8090 exits and the next one listens on 8092.
 
@@ -516,6 +541,7 @@ A call that presents a hop the proxy of this process did not write is **400** `i
 | Tray and Settings launch | `src/cli/pm_image_cmd_tray.cpp`, `src/win/settings_services.cpp` |
 | GUI pair ticket | `src/win/ui_next/filepanel/FilePanelSourceCatalog.cpp` (`pair` over IPC) |
 | Desktop dial | `src/vfs/peer_dial.hpp`, `src/vfs/phone_client.hpp` |
+| Desktop file-panel Places | `src/win/ui_next/filepanel/FilePanelSourceCatalog.cpp`, `FilePanelLocationMenu.cpp`, `RemoteVfsFolderModel.cpp`; interface and migration todos in `tanit-mesh-overview.md` §5–6 |
 | Phone dial and capture | `android/tanit/.../chat/PhoneVfs.kt`, `DesktopAudio.kt`, `audio/VoiceSetup.kt`, `audio/VoiceGearSheet.kt` |
 | Capture format | `packages/audio.cpp/src/source_host.cpp`, `include/pm/audio/stream_gap.hpp` |
 | E2EE, not linked | `packages/encryption.cpp` |
@@ -526,13 +552,13 @@ Run these after a change to the pair row, the gate, the hop, or a dial. Each one
 
 | Command | What it holds |
 |---|---|
-| `npm run test:node-serve` | One `node serve`. Health, serve key, vfs, a forged hop is 400, a revoked token is 401, a files grant on audio is 403, a path outside the mount, phone announce into `lan/peers.json` |
-| `npm run test:node-peer` | Two desktops. Pair on the TLS port, pin check, vfs read. A wrong pin sends nothing |
+| `npm run test:node-serve` | One `node serve`. Health, serve key, vfs, a forged hop is 400, a revoked token is 401, a files grant on audio is 403, a path outside the mount. A confirm stores every grant off. A serve-key announce writes the phone's pair row and `lan/peers.json`. The pair-token announce still writes the caller's row. Revoking the announcer drops that phone from `peers.json` and the Places cache. Revoking the phone drops its own row |
+| `npm run test:node-peer` | Two desktops. Pair on the TLS port, pin check, vfs read after a settings grant. A wrong pin sends nothing. A second pair of the same device id moves the revision and the grant that authorizes is the empty one |
 | `npm run test:phone-peer` | Two phone listeners. Same pin rule, vfs read, announce onto the pair row |
-| `npm run test:vfs-phone` | Desktop dials a phone listener. Pin, restart, cleartext refusal, grant narrow, no socket before a network is granted |
-| `npm run test:agent-lan` | `llm agent --serve` with a bearer, paired models and audio against that process |
+| `npm run test:vfs-phone` | Desktop dials a phone listener (`test core phone-listener`, the same listener as the app). Pin, restart, cleartext refusal, grant narrow, no socket before a network is granted. An announce with folder access off carries no address. A new pair file makes the old dial token 401 and the next announce carries a new one. A lower inbound revision replaces a cached `write`, and `ENETWORK` names the current vfs |
+| `npm run test:agent-lan` | `llm agent --serve` with a bearer. A confirm stores every grant off. Models, audio, and an announce stay 403 until a files grant. Revoke drops `peers.json` and the Places cache |
 | `npm run test:audio-pipe` | Two desktops, audio scope, session id, two readers, stale stop, `--audio-rate` default, explicit 16 kHz |
-| `npm run test:node-tray` | One node. IPC lists it. A second `node serve` on that port exits. The first still answers, and a forged hop is 400. After the first exits, the port can be served again. A node row with no port is stored on 8092 when this process is the one reading `services.json` |
+| `npm run test:node-tray` | One node. IPC lists it. A second `node serve` on that port exits. The first still answers, and a forged hop is 400. After the first exits, the port can be served again. A node row with no port is stored on 8092 when this process is the one reading `services.json`, and `--pair` is removed from that row. The agent row keeps its own `--pair`. When 8092 is free, `tray start node` comes back on 8092 and 8093 after a restart and does not open a pairing window |
 
-`PhoneVfsInstrumentedTest` is the on-device pin and grant check. It is not a substitute for the tray process. The both-pin QR exchange stays parked and is not one of these suites.
+`PhoneVfsInstrumentedTest` is the on-device pin and grant check. It is not a substitute for the tray process, and the six pair todos do not need it. The both-pin QR exchange stays parked and is not one of these suites.
 

@@ -331,6 +331,25 @@ void send_shared_bytes(
     res.set_content(body.body, body.mime.empty() ? "application/octet-stream" : body.mime);
 }
 
+/// The mounts this caller may see. Everything when `mount_allowed` is unset.
+std::vector<SharedRoot> visible_roots(std::vector<SharedRoot> roots, const LlmVfsAccess& access)
+{
+    if (!access.mount_allowed)
+        return roots;
+    roots.erase(std::remove_if(roots.begin(), roots.end(),
+                               [&access](const SharedRoot& root) { return !access.mount_allowed(root.name); }),
+                roots.end());
+    return roots;
+}
+
+/// What the caller may do on a mount. `write` also means mkdir, move, delete.
+nlohmann::json can_json(const LlmVfsAccess& access)
+{
+    if (access.full || access.write)
+        return nlohmann::json::array({"list", "stat", "read", "write", "mkdir", "move", "delete"});
+    return nlohmann::json::array({"list", "stat", "read"});
+}
+
 bool write_allowed(const LlmVfsAccess& access, httplib::Response& res)
 {
     if (access.full || access.write)
@@ -397,16 +416,14 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
         if (!guard(req, res, access))
             return;
         nlohmann::json mounts = nlohmann::json::array();
-        for (const auto& root : shared_roots()) {
+        for (const auto& root : visible_roots(shared_roots(), access)) {
             mounts.push_back({
                 {"name", root.name},
                 {"label", root.label.empty() ? root.name : root.label},
                 {"uri", vfs_uri(authority, root.name, {})},
                 {"host", authority},
                 {"kind", "folder"},
-                {"can", access.full || access.write
-                    ? nlohmann::json::array({"list", "stat", "read", "write"})
-                    : nlohmann::json::array({"list", "stat", "read"})},
+                {"can", can_json(access)},
             });
         }
         send_json(res, 200, {{"ok", true}, {"mounts", std::move(mounts)}});
@@ -422,7 +439,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
             send_json(res, 400, fail_body("EINVAL", err));
             return;
         }
-        const auto roots = shared_roots();
+        const auto roots = visible_roots(shared_roots(), access);
         if (!find_root(roots, loc.mount)) {
             send_json(res, 404, fail_body("ENOENT", "unknown mount"));
             return;
@@ -445,6 +462,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
             {"ok", true},
             {"mount", loc.mount},
             {"uri", vfs_uri(authority, loc.mount, loc.path)},
+            {"can", can_json(access)},
             {"entries", std::move(entries)},
         });
     });
@@ -459,7 +477,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
             send_json(res, 400, fail_body("EINVAL", err));
             return;
         }
-        const auto roots = shared_roots();
+        const auto roots = visible_roots(shared_roots(), access);
         if (!find_root(roots, loc.mount)) {
             send_json(res, 404, fail_body("ENOENT", "unknown mount"));
             return;
@@ -479,7 +497,8 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
     });
 
     auto resolve_paths = [shared_roots, authority](
-                             const nlohmann::json& paths, nlohmann::json& items, std::string& err) {
+                             const LlmVfsAccess& access, const nlohmann::json& paths,
+                             nlohmann::json& items, std::string& err) {
         if (!paths.is_array()) {
             err = "paths must be an array";
             return false;
@@ -488,7 +507,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
             err = "at most 64 paths";
             return false;
         }
-        const auto roots = shared_roots();
+        const auto roots = visible_roots(shared_roots(), access);
         for (const auto& row : paths) {
             if (!row.is_string())
                 continue;
@@ -510,7 +529,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
         nlohmann::json batch = nlohmann::json::array();
         batch.push_back(path);
         std::string err;
-        if (!resolve_paths(batch, items, err)) {
+        if (!resolve_paths(access, batch, items, err)) {
             send_json(res, 400, fail_body("EINVAL", err));
             return;
         }
@@ -531,7 +550,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
         nlohmann::json items = nlohmann::json::array();
         std::string err;
         const nlohmann::json paths = body.contains("paths") ? body["paths"] : nlohmann::json::array();
-        if (!resolve_paths(paths, items, err)) {
+        if (!resolve_paths(access, paths, items, err)) {
             send_json(res, 400, fail_body("EINVAL", err));
             return;
         }
@@ -548,7 +567,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
                 send_json(res, 400, fail_body("EINVAL", "file must be an absolute path"));
                 return;
             }
-            const auto roots = shared_roots();
+            const auto roots = visible_roots(shared_roots(), access);
             const auto hit = locate(file, roots, authority);
             if (!hit || hit->rel.empty()) {
                 send_json(res, 404, fail_body("ENOENT", "not a shared file"));
@@ -563,7 +582,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
             send_json(res, 400, fail_body("EINVAL", err));
             return;
         }
-        send_shared_bytes(res, shared_roots(), authority, loc.mount, loc.path);
+        send_shared_bytes(res, visible_roots(shared_roots(), access), authority, loc.mount, loc.path);
     });
 
     svr.Put("/v1/vfs/write", [guard, shared_roots](const httplib::Request& req, httplib::Response& res) {
@@ -618,7 +637,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
             send_json(res, 400, fail_body("EINVAL", err));
             return;
         }
-        const auto roots = shared_roots();
+        const auto roots = visible_roots(shared_roots(), access);
         if (!find_root(roots, loc.mount)) {
             send_json(res, 404, fail_body("ENOENT", "unknown mount"));
             return;
@@ -654,7 +673,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
             send_json(res, 400, fail_body("EINVAL", err));
             return;
         }
-        const auto roots = shared_roots();
+        const auto roots = visible_roots(shared_roots(), access);
         if (!find_root(roots, loc.mount)) {
             send_json(res, 404, fail_body("ENOENT", "unknown mount"));
             return;
@@ -690,7 +709,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
             send_json(res, 400, fail_body("EINVAL", err));
             return;
         }
-        const auto roots = shared_roots();
+        const auto roots = visible_roots(shared_roots(), access);
         if (!find_root(roots, loc.mount)) {
             send_json(res, 404, fail_body("ENOENT", "unknown mount"));
             return;
@@ -734,7 +753,7 @@ void register_llm_vfs_routes(httplib::Server& svr, LlmVfsHost host)
             send_json(res, 400, fail_body("EINVAL", "toMount is required"));
             return;
         }
-        const auto roots = shared_roots();
+        const auto roots = visible_roots(shared_roots(), access);
         if (!find_root(roots, from.mount) || !find_root(roots, to.mount)) {
             send_json(res, 404, fail_body("ENOENT", "unknown mount"));
             return;

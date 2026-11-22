@@ -81,10 +81,9 @@ void mount_node(httplib::Server& server, const pm::server::ListenOptions& option
     });
     media_cli::node_detail::register_lan_routes(server, require_v1_auth, options.features);
     server.Get("/v1/models", [options](const httplib::Request& req, httplib::Response& res) {
-        // route_enabled hides this path while llm is off. The list is presets, not chat.
-        pm::server::ListenOptions gate = options;
-        gate.features.llm = true;
-        if (!media_cli::node_detail::desktop_authorize(gate, req, res))
+        // Presets only. Completions stay on the agent. route_enabled allows
+        // /v1/models when lan is on, so this authorize uses the real feature set.
+        if (!media_cli::node_detail::desktop_authorize(options, req, res))
             return;
         res.status = 200;
         res.set_content(preset_models_json().dump(), "application/json");

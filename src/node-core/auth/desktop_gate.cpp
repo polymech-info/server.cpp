@@ -117,6 +117,7 @@ bool desktop_authorize_vfs(const pm::server::ListenOptions& options, const httpl
             access.files = true;
             logger::info(std::string("[peer] vfs ") + dev.id);
             access.write = dev.write;
+            access.mount_allowed = dev.mount_allowed;
             access.grant_revision = dev.revision;
             access.still_granted = [id = dev.id, revision = dev.revision]() {
                 if (!g_lan)

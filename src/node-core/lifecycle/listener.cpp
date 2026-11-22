@@ -4,6 +4,7 @@
 #include "pm/node/peer_listener.hpp"
 #include "pm/node/listener_tls.hpp"
 
+#include "lan/mesh_consent.hpp"
 #include "pm/server/features.hpp"
 #include "pm/server/secret.hpp"
 #include "pm/server/vfs.hpp"
@@ -99,10 +100,11 @@ struct Shared {
             return false;
         }
         peer = access.peer;
-        if (!pm::lan::network_granted(peer.outbound, arrived_on(req))) {
+        if (!pm::lan::network_granted(peer.allow_peer, arrived_on(req))) {
             note(true, where(req) + " deny network peer=" + peer.id);
             nlohmann::json body = refusal("ENETWORK", "This network is not granted to this device.");
-            body["revision"] = peer.outbound.revision;
+            body["revision"] = peer.allow_peer.revision;
+            body["vfs"] = pm::lan::vfs_grant_name(peer.allow_peer.vfs);
             send(res, 403, body);
             return false;
         }
@@ -238,7 +240,7 @@ std::vector<std::string> granted_addresses(const PeerListenerHost& host, const p
             continue;
         bool granted = false;
         for (const auto& row : rows) {
-            if (row.trust == pm::lan::Trust::Paired && pm::lan::network_granted(row.outbound, net.address))
+            if (row.trust == pm::lan::Trust::Paired && pm::lan::network_granted(row.allow_peer, net.address))
                 granted = true;
         }
         if (!granted)
@@ -500,8 +502,10 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
         });
     });
 
-    // The caller's own outbound row. A peer whose vfs is off still gets 200
+    // The caller's own allow_peer row. A peer whose vfs is off still gets 200
     // here: it is paired, and this is how it learns the permission is off.
+    // `allow_peer` is the capability document. The flat fields under `grant`
+    // stay for the phone UI. `revision` there is the document generation.
     server->Get("/v1/lan/grant", [shared](const httplib::Request& req, httplib::Response& res) {
         pm::lan::Peer peer;
         if (!shared->admit(req, res, peer))
@@ -511,13 +515,16 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
             {"id", peer.id},
             {"authority", shared->host.authority},
             {"trust", pm::lan::trust_name(peer.trust)},
+            {"allow_peer", pm::lan::allow_peer_json(peer.allow_peer)},
+            {"allow_peer_revision", peer.allow_peer.revision},
             {"grant", {
-                {"revision", peer.outbound.revision},
-                {"vfs", pm::lan::vfs_grant_name(peer.outbound.vfs)},
-                {"audio", peer.outbound.audio},
-                {"video", peer.outbound.video},
-                {"chat", peer.outbound.chat},
-                {"tools", peer.outbound.tools},
+                {"revision", peer.allow_peer.revision},
+                {"vfs_revision", peer.allow_peer.vfs_revision},
+                {"vfs", pm::lan::vfs_grant_name(peer.allow_peer.vfs)},
+                {"audio", peer.allow_peer.audio},
+                {"video", peer.allow_peer.video},
+                {"chat", peer.allow_peer.chat},
+                {"tools", peer.allow_peer.tools},
             }},
         });
     });
@@ -529,12 +536,23 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
         pm::lan::Peer peer;
         if (!shared->admit(req, res, peer))
             return;
-        if (peer.outbound.vfs == pm::lan::VfsGrant::Off) {
-            shared->note(true, shared->where(req) + " deny grant peer=" + peer.id);
-            nlohmann::json body = refusal("EGRANT", "Folder access is off for this device.");
-            body["revision"] = peer.outbound.revision;
-            send(res, 403, body);
-            return;
+        {
+            const pm::lan::Decision first =
+                pm::lan::grant_authorize(peer.allow_peer, pm::lan::k_cap_vfs, "read", "");
+            const pm::lan::Decision decided =
+                first == pm::lan::Decision::Ask
+                    ? pm::lan::authorize_peer(&shared->store, peer, pm::lan::k_cap_vfs, "read", "")
+                    : first;
+            if (decided != pm::lan::Decision::Allow) {
+                shared->note(true, shared->where(req) + " deny grant peer=" + peer.id);
+                const nlohmann::json body =
+                    first == pm::lan::Decision::Ask
+                        ? pm::lan::mesh_ask_refusal(peer, pm::lan::k_cap_vfs,
+                                                    "Folder access needs permission on this device.")
+                        : pm::lan::mesh_grant_refusal(peer, "Folder access is off for this device.");
+                send(res, 403, body);
+                return;
+            }
         }
         if (req.body.size() > 16u * 1024u) {
             send(res, 413, refusal("EBODY", "The announce is too large."));
@@ -613,32 +631,63 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
         if (!shared->admit(req, res, peer))
             return false;
         const pm::server::RouteGrant need = pm::server::route_grant(req.path);
-        if (need != pm::server::RouteGrant::Files || peer.outbound.vfs == pm::lan::VfsGrant::Off) {
+        // Semantic query on the pair row: `vfs` read. Write and the mount list
+        // are narrowed below. `ask` runs the installed mesh consent prompt
+        // (default Deny). UI hosts install a prompt on top.
+        if (need != pm::server::RouteGrant::Files) {
             shared->note(true, shared->where(req) + " deny grant peer=" + peer.id);
-            nlohmann::json body = refusal("EGRANT", "Folder access is off for this device.");
-            body["revision"] = peer.outbound.revision;
-            body["vfs"] = pm::lan::vfs_grant_name(peer.outbound.vfs);
-            send(res, 403, body);
+            send(res, 403, pm::lan::mesh_grant_refusal(peer, "Folder access is off for this device."));
             return false;
+        }
+        {
+            const pm::lan::Decision first =
+                pm::lan::grant_authorize(peer.allow_peer, pm::lan::k_cap_vfs, "read", "");
+            const pm::lan::Decision decided =
+                first == pm::lan::Decision::Ask
+                    ? pm::lan::authorize_peer(&shared->store, peer, pm::lan::k_cap_vfs, "read", "")
+                    : first;
+            if (decided != pm::lan::Decision::Allow) {
+                shared->note(true, shared->where(req) + " deny grant peer=" + peer.id);
+                const nlohmann::json body =
+                    first == pm::lan::Decision::Ask
+                        ? pm::lan::mesh_ask_refusal(peer, pm::lan::k_cap_vfs,
+                                                    "Folder access needs permission on this device.")
+                        : pm::lan::mesh_grant_refusal(peer, "Folder access is off for this device.");
+                send(res, 403, body);
+                return false;
+            }
         }
         access.device_id = peer.id;
         access.files = true;
-        access.write = peer.outbound.vfs == pm::lan::VfsGrant::Write;
-        access.grant_revision = peer.outbound.revision;
-        access.still_granted = [shared, id = peer.id, revision = peer.outbound.revision,
+        access.write = pm::lan::authorize_peer(&shared->store, peer, pm::lan::k_cap_vfs, "write", "")
+                       == pm::lan::Decision::Allow;
+        // `vfs.resources` narrows the mounts. Empty lists every published mount.
+        if (!pm::lan::grant_resources(peer.allow_peer, pm::lan::k_cap_vfs).empty()) {
+            access.mount_allowed = [grant = peer.allow_peer](std::string_view mount) {
+                return pm::lan::grant_resource_allowed(grant, pm::lan::k_cap_vfs,
+                                                       "mount:" + std::string(mount));
+            };
+        }
+        // The stream guard watches the vfs capability only. An audio or chat
+        // edit does not end a folder operation. An AllowOnce ticket keeps a
+        // stream alive until the capability revision moves.
+        access.grant_revision = peer.allow_peer.vfs_revision;
+        access.still_granted = [shared, id = peer.id, revision = peer.allow_peer.vfs_revision,
                                 write = access.write]() {
             pm::lan::Peer now;
             std::string err;
             if (!shared->store.find(id, now, err) || now.trust != pm::lan::Trust::Paired)
                 return false;
-            if (now.outbound.revision != revision)
+            if (now.allow_peer.vfs_revision != revision)
                 return false;
-            if (write)
-                return now.outbound.vfs == pm::lan::VfsGrant::Write;
-            return now.outbound.vfs != pm::lan::VfsGrant::Off;
+            const char* op = write ? "write" : "read";
+            if (pm::lan::mesh_consent_ticket_allows(id, pm::lan::k_cap_vfs, op, "", revision))
+                return true;
+            return pm::lan::grant_authorize(now.allow_peer, pm::lan::k_cap_vfs, op, "")
+                   == pm::lan::Decision::Allow;
         };
         shared->note(false, shared->where(req) + " allow grant="
-                                + pm::lan::vfs_grant_name(peer.outbound.vfs) + " peer=" + peer.id);
+                                + pm::lan::vfs_grant_name(peer.allow_peer.vfs) + " peer=" + peer.id);
         return true;
     };
     media_cli::register_llm_vfs_routes(*server, std::move(vfs));
@@ -725,9 +774,11 @@ std::string peer_state_json(const pm::lan::PairStore& store, const std::string& 
                 {"id", row.id},
                 {"name", row.name},
                 {"trust", pm::lan::trust_name(row.trust)},
-                {"vfs", pm::lan::vfs_grant_name(row.outbound.vfs)},
-                {"revision", row.outbound.revision},
-                {"networks", row.outbound.networks},
+                {"vfs", pm::lan::vfs_grant_name(row.allow_peer.vfs)},
+                {"revision", row.allow_peer.revision},
+                {"vfs_revision", row.allow_peer.vfs_revision},
+                {"networks", row.allow_peer.networks},
+                {"allow_peer", pm::lan::allow_peer_json(row.allow_peer)},
                 {"has_token", !row.token_sha256.empty()},
                 {"last_seen", row.last_seen},
             });
@@ -775,12 +826,18 @@ bool peer_announce_json(const pm::lan::PairStore& store, const std::string& peer
         err = "this device is not paired";
         return false;
     }
+    // A fresh pair has no token hash. The computer still holding the previous
+    // token answers "held" and then gets 401 on the folders. Issue one now.
+    if (!rotate && peer.token_sha256.empty())
+        rotate = true;
     nlohmann::json urls = nlohmann::json::array();
-    if (port > 0) {
+    // Folder access off, or no granted network, announces no address. A dial
+    // then has nothing to open.
+    if (port > 0 && peer.allow_peer.vfs != pm::lan::VfsGrant::Off) {
         for (const auto& net : networks) {
             if (urls.size() >= 8)
                 break;
-            if (!pm::lan::network_granted(peer.outbound, net.address))
+            if (!pm::lan::network_granted(peer.allow_peer, net.address))
                 continue;
             urls.push_back("https://" + net.address + ":" + std::to_string(port));
         }

@@ -144,68 +144,90 @@ Trust parse_trust(const std::string& text) noexcept
     return Trust::Revoked;
 }
 
-nlohmann::json grant_json(const Grant& grant)
+const char* switch_level(const std::string& value) noexcept
 {
-    return {
-        {"revision", grant.revision},
-        {"vfs", vfs_grant_name(grant.vfs)},
-        {"audio", grant.audio},
-        {"video", grant.video},
-        {"chat", grant.chat},
-        {"tools", grant.tools},
-        {"networks", grant.networks},
-    };
+    if (value == "on")
+        return "use";
+    // `ask` is stored as written. It never reads as `on`.
+    return value == "ask" ? "ask" : "off";
 }
 
-bool read_switch(const nlohmann::json& node, const char* key, std::string& out, std::string& err)
+bool resource_matches(std::string_view pattern, std::string_view resource) noexcept
 {
-    out = "off";
-    if (!node.contains(key))
+    if (pattern == "*")
         return true;
-    if (!node[key].is_string()) {
-        err = "the pair file is not valid";
-        return false;
+    if (!pattern.empty() && pattern.back() == '*') {
+        const std::string_view prefix = pattern.substr(0, pattern.size() - 1);
+        return resource.size() >= prefix.size() && resource.substr(0, prefix.size()) == prefix;
     }
-    const std::string value = node[key].get<std::string>();
-    if (value != "on" && value != "off") {
-        err = "the pair file is not valid";
-        return false;
-    }
-    out = value;
-    return true;
+    return pattern == resource;
 }
 
-bool grant_from(const nlohmann::json& node, Grant& grant, std::string& err)
+/// A capability object: its unmodelled members, then `revision` and `level`.
+nlohmann::json capability_json(const Grant& grant, const char* id, int revision, const char* level)
 {
-    grant = {};
+    nlohmann::json out = nlohmann::json::object();
+    const auto extra = grant.capability_extra.find(id);
+    if (extra != grant.capability_extra.end() && extra->second.is_object())
+        out = extra->second;
+    out["revision"] = (std::max)(1, revision);
+    out["level"] = level;
+    return out;
+}
+
+/// Reads `revision` and `level` of a known capability. The remaining members
+/// go to @p extra unchanged.
+bool read_capability(const nlohmann::json& node, int& revision, std::string& level,
+                     nlohmann::json& extra, std::string& err)
+{
+    revision = 1;
+    level.clear();
+    extra = nlohmann::json::object();
     if (!node.is_object()) {
         err = "the pair file is not valid";
         return false;
     }
-    if (node.contains("revision") && node["revision"].is_number_integer())
-        grant.revision = (std::max)(1, node["revision"].get<int>());
-    if (node.contains("vfs")) {
-        if (!node["vfs"].is_string() ||
-            !parse_vfs_grant(node["vfs"].get<std::string>(), grant.vfs)) {
-            err = "the pair file is not valid";
-            return false;
-        }
-    }
-    if (!read_switch(node, "audio", grant.audio, err) ||
-        !read_switch(node, "video", grant.video, err) ||
-        !read_switch(node, "chat", grant.chat, err) ||
-        !read_switch(node, "tools", grant.tools, err))
-        return false;
-    if (node.contains("networks") && node["networks"].is_array()) {
-        for (const auto& row : node["networks"]) {
-            if (!row.is_string() || !cidr_valid(row.get<std::string>())) {
+    for (auto it = node.begin(); it != node.end(); ++it) {
+        if (it.key() == "revision") {
+            if (!it.value().is_number_integer()) {
                 err = "the pair file is not valid";
                 return false;
             }
-            grant.networks.push_back(row.get<std::string>());
+            revision = (std::max)(1, it.value().get<int>());
+        } else if (it.key() == "level") {
+            if (!it.value().is_string()) {
+                err = "the pair file is not valid";
+                return false;
+            }
+            level = it.value().get<std::string>();
+        } else {
+            extra[it.key()] = it.value();
         }
     }
     return true;
+}
+
+bool read_switch_level(const std::string& level, std::string& out, std::string& err)
+{
+    out = "off";
+    if (level.empty() || level == "off")
+        return true;
+    if (level == "use") {
+        out = "on";
+        return true;
+    }
+    if (level == "ask") {
+        out = "ask";
+        return true;
+    }
+    err = "the pair file is not valid";
+    return false;
+}
+
+void keep_extra(Grant& grant, const char* id, nlohmann::json extra)
+{
+    if (extra.is_object() && !extra.empty())
+        grant.capability_extra[id] = std::move(extra);
 }
 
 std::string text_of(const nlohmann::json& row, const char* key)
@@ -296,15 +318,25 @@ bool read_doc(const std::filesystem::path& file, std::string& identity, std::vec
     int version = 0;
     if (doc.contains("version") && doc["version"].is_number_integer())
         version = doc["version"].get<int>();
-    if (version != 1 && version != 2) {
+    if (version == 1 || version == 2) {
+        err = "the pair file is version " + std::to_string(version)
+              + "; only version 3 is supported. Delete it and pair the devices again";
+        return false;
+    }
+    if (version != 3) {
         err = "the pair file is not valid";
         return false;
     }
     if (doc.contains("identity") && doc["identity"].is_string())
         identity = doc["identity"].get<std::string>();
     for (const auto& row : doc["devices"]) {
-        if (!row.is_object() || (row.contains("scopes") && !row.contains("outbound"))) {
-            err = row.contains("scopes") ? "pair file uses ticket scopes" : "the pair file is not valid";
+        if (!row.is_object() || (row.contains("scopes") && !row.contains("allow_peer"))) {
+            err = row.is_object() && row.contains("scopes") ? "pair file uses ticket scopes"
+                                                            : "the pair file is not valid";
+            return false;
+        }
+        if (row.contains("outbound")) {
+            err = "the pair file uses outbound; only allow_peer is supported. Delete it and pair the devices again";
             return false;
         }
         Peer peer;
@@ -329,9 +361,16 @@ bool read_doc(const std::filesystem::path& file, std::string& identity, std::vec
             return false;
         }
         peer.trust = parse_trust(text_of(row, "trust"));
-        if (!grant_from(row.contains("outbound") ? row["outbound"] : nlohmann::json::object(),
-                        peer.outbound, err))
+        if (!allow_peer_from_json(row.contains("allow_peer") ? row["allow_peer"] : nlohmann::json::object(),
+                                  peer.allow_peer, err))
             return false;
+        if (row.contains("allow_peer_revision")) {
+            if (!row["allow_peer_revision"].is_number_integer()) {
+                err = "the pair file is not valid";
+                return false;
+            }
+            peer.allow_peer.revision = (std::max)(1, row["allow_peer_revision"].get<int>());
+        }
         peer.created = text_of(row, "created");
         peer.last_seen = text_of(row, "last_seen");
         out.push_back(std::move(peer));
@@ -353,7 +392,8 @@ bool write_doc(const std::filesystem::path& file, std::string_view identity,
             {"dial_token", peer.dial_token},
             {"token_sha256", peer.token_sha256},
             {"trust", trust_name(peer.trust)},
-            {"outbound", grant_json(peer.outbound)},
+            {"allow_peer", allow_peer_json(peer.allow_peer)},
+            {"allow_peer_revision", peer.allow_peer.revision},
             {"created", peer.created},
             {"last_seen", peer.last_seen},
         });
@@ -366,7 +406,7 @@ bool write_doc(const std::filesystem::path& file, std::string_view identity,
     std::filesystem::path bak = file;
     bak += ".bak";
     const std::string body =
-        nlohmann::json{{"version", 2}, {"identity", std::string(identity)}, {"devices", std::move(devices)}}
+        nlohmann::json{{"version", 3}, {"identity", std::string(identity)}, {"devices", std::move(devices)}}
             .dump(2);
 #if defined(_WIN32)
     FILE* fp = _wfopen(tmp.c_str(), L"wb");
@@ -433,16 +473,6 @@ bool write_doc(const std::filesystem::path& file, std::string_view identity,
     }
 #endif
     return true;
-}
-
-void clear_caps(Grant& grant)
-{
-    grant.vfs = VfsGrant::Off;
-    grant.audio = "off";
-    grant.video = "off";
-    grant.chat = "off";
-    grant.tools = "off";
-    grant.networks.clear();
 }
 
 Peer* row_of(std::vector<Peer>& rows, std::string_view id)
@@ -577,18 +607,257 @@ bool grant_set_scope(Grant& grant, std::string_view scope)
 
 std::vector<std::string> grant_scopes(const Grant& grant)
 {
+    // A projection of the semantic query. A scope is listed when its
+    // capability allows use. `ask` and reserved capabilities never appear.
+    struct Scope {
+        const char* name;
+        const char* capability;
+        const char* operation;
+    };
+    const Scope table[] = {
+        {"files", k_cap_vfs, "read"},
+        {"audio", k_cap_audio_capture, "start"},
+        {"video", k_cap_video_capture, "start"},
+        {"chat", k_cap_chat_turn, "turn"},
+        {"tools", k_cap_tools_call, "call"},
+    };
     std::vector<std::string> scopes;
-    if (grant.vfs != VfsGrant::Off)
-        scopes.emplace_back("files");
-    if (grant.audio == "on")
-        scopes.emplace_back("audio");
-    if (grant.video == "on")
-        scopes.emplace_back("video");
-    if (grant.chat == "on")
-        scopes.emplace_back("chat");
-    if (grant.tools == "on")
-        scopes.emplace_back("tools");
+    for (const Scope& scope : table) {
+        if (grant_authorize(grant, scope.capability, scope.operation, "") == Decision::Allow)
+            scopes.emplace_back(scope.name);
+    }
     return scopes;
+}
+
+bool capability_known(std::string_view id) noexcept
+{
+    return id == k_cap_vfs || id == k_cap_audio_capture || id == k_cap_video_capture ||
+           id == k_cap_chat_turn || id == k_cap_tools_call;
+}
+
+bool capability_reserved(std::string_view id) noexcept
+{
+    return id == k_cap_audio_playback || id == k_cap_video_control || id == k_cap_chat_realtime ||
+           id == k_cap_speech_stt || id == k_cap_speech_tts || id == k_cap_host_open;
+}
+
+std::vector<std::string> grant_resources(const Grant& grant, std::string_view capability)
+{
+    std::vector<std::string> out;
+    const auto found = grant.capability_extra.find(std::string(capability));
+    if (found == grant.capability_extra.end() || !found->second.is_object())
+        return out;
+    const auto it = found->second.find("resources");
+    if (it == found->second.end() || !it->is_array())
+        return out;
+    for (const auto& item : *it) {
+        if (item.is_string())
+            out.push_back(item.get<std::string>());
+    }
+    return out;
+}
+
+bool grant_resource_allowed(const Grant& grant, std::string_view capability, std::string_view resource)
+{
+    const auto resources = grant_resources(grant, capability);
+    if (resources.empty() || resource.empty())
+        return true;
+    // A vfs entry may name the mount bare (`photos`) or as `mount:photos`.
+    constexpr std::string_view mount_prefix = "mount:";
+    const bool vfs_mount = capability == k_cap_vfs && resource.substr(0, mount_prefix.size()) == mount_prefix;
+    for (const auto& entry : resources) {
+        if (resource_matches(entry, resource))
+            return true;
+        if (vfs_mount && resource_matches(entry, resource.substr(mount_prefix.size())))
+            return true;
+    }
+    return false;
+}
+
+Decision grant_authorize(const Grant& grant, std::string_view capability, std::string_view operation,
+                         std::string_view resource)
+{
+    if (!capability_known(capability))
+        return Decision::Unsupported;
+    Decision decision = Decision::Deny;
+    if (capability == k_cap_vfs) {
+        const bool read_op = operation == "list" || operation == "stat" || operation == "read" ||
+                             operation == "resolve";
+        const bool write_op = operation == "write" || operation == "mkdir" || operation == "move" ||
+                              operation == "delete";
+        if (grant.vfs == VfsGrant::Off) {
+            if (grant.vfs_ask && (read_op || write_op))
+                decision = Decision::Ask;
+        } else if (read_op) {
+            decision = Decision::Allow;
+        } else if (write_op && grant.vfs == VfsGrant::Write) {
+            decision = Decision::Allow;
+        }
+    } else {
+        const std::string* level = nullptr;
+        if (capability == k_cap_audio_capture)
+            level = &grant.audio;
+        else if (capability == k_cap_video_capture)
+            level = &grant.video;
+        else if (capability == k_cap_chat_turn)
+            level = &grant.chat;
+        else
+            level = &grant.tools;
+        if (*level == "on")
+            decision = Decision::Allow;
+        else if (*level == "ask")
+            decision = Decision::Ask;
+    }
+    if (decision != Decision::Deny && !grant_resource_allowed(grant, capability, resource))
+        return Decision::Deny;
+    return decision;
+}
+
+int grant_capability_revision(const Grant& grant, std::string_view name) noexcept
+{
+    if (name == k_cap_vfs || name == "files")
+        return grant.vfs_revision;
+    if (name == k_cap_audio_capture || name == "audio")
+        return grant.audio_revision;
+    if (name == k_cap_video_capture || name == "video")
+        return grant.video_revision;
+    if (name == k_cap_chat_turn || name == "chat")
+        return grant.chat_revision;
+    if (name == k_cap_tools_call || name == "tools")
+        return grant.tools_revision;
+    return 0;
+}
+
+nlohmann::json allow_peer_json(const Grant& grant)
+{
+    nlohmann::json doc = nlohmann::json::object();
+    const char* vfs_level = grant.vfs == VfsGrant::Off && grant.vfs_ask ? "ask" : vfs_grant_name(grant.vfs);
+    nlohmann::json vfs = capability_json(grant, k_cap_vfs, grant.vfs_revision, vfs_level);
+    if (!grant.networks.empty())
+        vfs["conditions"]["networks"] = grant.networks;
+    doc[k_cap_vfs] = std::move(vfs);
+    doc[k_cap_audio_capture] =
+        capability_json(grant, k_cap_audio_capture, grant.audio_revision, switch_level(grant.audio));
+    doc[k_cap_video_capture] =
+        capability_json(grant, k_cap_video_capture, grant.video_revision, switch_level(grant.video));
+    doc[k_cap_chat_turn] =
+        capability_json(grant, k_cap_chat_turn, grant.chat_revision, switch_level(grant.chat));
+    doc[k_cap_tools_call] =
+        capability_json(grant, k_cap_tools_call, grant.tools_revision, switch_level(grant.tools));
+    for (const auto& entry : grant.unknown_capabilities) {
+        // A known id is always written from the fields above.
+        if (!capability_known(entry.first))
+            doc[entry.first] = entry.second;
+    }
+    return doc;
+}
+
+bool allow_peer_from_json(const nlohmann::json& node, Grant& grant, std::string& err)
+{
+    grant = {};
+    if (!node.is_object()) {
+        err = "the pair file is not valid";
+        return false;
+    }
+    for (auto it = node.begin(); it != node.end(); ++it) {
+        const std::string& id = it.key();
+        if (!capability_known(id)) {
+            grant.unknown_capabilities[id] = it.value();
+            continue;
+        }
+        int revision = 1;
+        std::string level;
+        nlohmann::json extra;
+        if (!read_capability(it.value(), revision, level, extra, err))
+            return false;
+        if (id == k_cap_vfs) {
+            grant.vfs_revision = revision;
+            if (level == "ask") {
+                // Stored, never use. `vfs` stays off.
+                grant.vfs = VfsGrant::Off;
+                grant.vfs_ask = true;
+            } else if (!level.empty() && !parse_vfs_grant(level, grant.vfs)) {
+                err = "the pair file is not valid";
+                return false;
+            }
+            if (extra.contains("conditions")) {
+                if (!extra["conditions"].is_object()) {
+                    err = "the pair file is not valid";
+                    return false;
+                }
+                nlohmann::json conditions = extra["conditions"];
+                if (conditions.contains("networks")) {
+                    if (!conditions["networks"].is_array()) {
+                        err = "the pair file is not valid";
+                        return false;
+                    }
+                    for (const auto& row : conditions["networks"]) {
+                        if (!row.is_string() || !cidr_valid(row.get<std::string>())) {
+                            err = "the pair file is not valid";
+                            return false;
+                        }
+                        grant.networks.push_back(row.get<std::string>());
+                    }
+                    conditions.erase("networks");
+                }
+                if (conditions.empty())
+                    extra.erase("conditions");
+                else
+                    extra["conditions"] = std::move(conditions);
+            }
+            keep_extra(grant, k_cap_vfs, std::move(extra));
+            continue;
+        }
+        std::string* slot = nullptr;
+        int* rev = nullptr;
+        if (id == k_cap_audio_capture) {
+            slot = &grant.audio;
+            rev = &grant.audio_revision;
+        } else if (id == k_cap_video_capture) {
+            slot = &grant.video;
+            rev = &grant.video_revision;
+        } else if (id == k_cap_chat_turn) {
+            slot = &grant.chat;
+            rev = &grant.chat_revision;
+        } else {
+            slot = &grant.tools;
+            rev = &grant.tools_revision;
+        }
+        if (!read_switch_level(level, *slot, err))
+            return false;
+        *rev = revision;
+        keep_extra(grant, id.c_str(), std::move(extra));
+    }
+    return true;
+}
+
+void grant_clear(Grant& grant)
+{
+    grant.vfs = VfsGrant::Off;
+    grant.vfs_ask = false;
+    grant.audio = "off";
+    grant.video = "off";
+    grant.chat = "off";
+    grant.tools = "off";
+    grant.networks.clear();
+    grant.capability_extra.clear();
+    grant.unknown_capabilities.clear();
+    ++grant.vfs_revision;
+    ++grant.audio_revision;
+    ++grant.video_revision;
+    ++grant.chat_revision;
+    ++grant.tools_revision;
+    ++grant.revision;
+}
+
+void grant_succeed(Grant& next, const Grant& prev)
+{
+    next.revision = (std::max)(2, prev.revision + 1);
+    next.vfs_revision = prev.vfs_revision + 1;
+    next.audio_revision = prev.audio_revision + 1;
+    next.video_revision = prev.video_revision + 1;
+    next.chat_revision = prev.chat_revision + 1;
+    next.tools_revision = prev.tools_revision + 1;
 }
 
 PairStore::PairStore(std::filesystem::path file, std::size_t max_peers)
@@ -814,10 +1083,14 @@ bool PairStore::set_grant(std::string_view id, VfsGrant vfs, const std::vector<s
         err = "this device is not paired";
         return false;
     }
-    if (row->outbound.vfs != vfs || row->outbound.networks != clean) {
-        row->outbound.vfs = vfs;
-        row->outbound.networks = std::move(clean);
-        ++row->outbound.revision;
+    if (row->allow_peer.vfs != vfs || row->allow_peer.networks != clean) {
+        row->allow_peer.vfs = vfs;
+        if (vfs != VfsGrant::Off)
+            row->allow_peer.vfs_ask = false;
+        row->allow_peer.networks = std::move(clean);
+        // Only the vfs capability changed. Audio, video, chat, and tools keep their revision.
+        ++row->allow_peer.vfs_revision;
+        ++row->allow_peer.revision;
         if (!write_doc(file_, identity, rows, err))
             return false;
         pm::node::sessions_cancel(id, "files");
@@ -844,30 +1117,48 @@ bool PairStore::set_caps(std::string_view id, VfsGrant vfs, bool audio, bool vid
     const std::string video_flag = flag(video);
     const std::string chat_flag = flag(chat);
     const std::string tools_flag = flag(tools);
-    const bool same = row->outbound.vfs == vfs && row->outbound.audio == audio_flag
-                      && row->outbound.video == video_flag && row->outbound.chat == chat_flag
-                      && row->outbound.tools == tools_flag;
+    const bool same = row->allow_peer.vfs == vfs && row->allow_peer.audio == audio_flag
+                      && row->allow_peer.video == video_flag && row->allow_peer.chat == chat_flag
+                      && row->allow_peer.tools == tools_flag;
     if (same) {
         out = *row;
         return true;
     }
+    // A capability revision moves only when that capability's switch changed.
+    Grant& grant = row->allow_peer;
     std::vector<std::string> dropped;
-    if (row->outbound.vfs != vfs)
+    if (grant.vfs != vfs) {
         dropped.emplace_back("files");
-    if (row->outbound.audio == "on" && !audio)
-        dropped.emplace_back("audio");
-    if (row->outbound.video == "on" && !video)
-        dropped.emplace_back("video");
-    if (row->outbound.chat == "on" && !chat)
-        dropped.emplace_back("chat");
-    if (row->outbound.tools == "on" && !tools)
-        dropped.emplace_back("tools");
-    row->outbound.vfs = vfs;
-    row->outbound.audio = audio_flag;
-    row->outbound.video = video_flag;
-    row->outbound.chat = chat_flag;
-    row->outbound.tools = tools_flag;
-    ++row->outbound.revision;
+        ++grant.vfs_revision;
+    }
+    if (grant.audio != audio_flag) {
+        ++grant.audio_revision;
+        if (!audio)
+            dropped.emplace_back("audio");
+    }
+    if (grant.video != video_flag) {
+        ++grant.video_revision;
+        if (!video)
+            dropped.emplace_back("video");
+    }
+    if (grant.chat != chat_flag) {
+        ++grant.chat_revision;
+        if (!chat)
+            dropped.emplace_back("chat");
+    }
+    if (grant.tools != tools_flag) {
+        ++grant.tools_revision;
+        if (!tools)
+            dropped.emplace_back("tools");
+    }
+    grant.vfs = vfs;
+    if (vfs != VfsGrant::Off)
+        grant.vfs_ask = false;
+    grant.audio = audio_flag;
+    grant.video = video_flag;
+    grant.chat = chat_flag;
+    grant.tools = tools_flag;
+    ++grant.revision;
     if (!write_doc(file_, identity, rows, err))
         return false;
     for (const auto& capability : dropped)
@@ -891,11 +1182,35 @@ bool PairStore::revoke(std::string_view id, std::string& err) const
     if (row->trust == Trust::Revoked)
         return true;
     row->trust = Trust::Revoked;
-    clear_caps(row->outbound);
-    ++row->outbound.revision;
+    grant_clear(row->allow_peer);
     if (!write_doc(file_, identity, rows, err))
         return false;
     pm::node::sessions_cancel(id, "");
+    return true;
+}
+
+bool PairStore::forget(std::string_view id, std::string& err) const
+{
+    std::lock_guard<std::mutex> lock(store_mutex());
+    std::vector<Peer> rows;
+    std::string identity;
+    if (!read_doc(file_, identity, rows, err))
+        return false;
+    const std::string key(id);
+    std::vector<Peer> kept;
+    kept.reserve(rows.size());
+    bool found = false;
+    for (const Peer& row : rows) {
+        if (row.id == key) {
+            found = true;
+            continue;
+        }
+        kept.push_back(row);
+    }
+    if (found && !write_doc(file_, identity, kept, err))
+        return false;
+    if (found)
+        pm::node::sessions_cancel(key, "");
     return true;
 }
 
@@ -917,8 +1232,7 @@ bool PairStore::repair(std::string_view id, Peer& out, std::string& err) const
         row->dial_token.clear();
         row->urls.clear();
         row->tls_fp.clear();
-        clear_caps(row->outbound);
-        ++row->outbound.revision;
+        grant_clear(row->allow_peer);
         row->last_seen = media::utc_now_iso8601();
         if (!write_doc(file_, identity, rows, err))
             return false;
@@ -957,7 +1271,7 @@ bool PairStore::any_peer_on(std::string_view local_ipv4) const
     if (!read_doc(file_, identity, rows, err))
         return false;
     for (const auto& row : rows) {
-        if (row.trust == Trust::Paired && network_granted(row.outbound, local_ipv4))
+        if (row.trust == Trust::Paired && network_granted(row.allow_peer, local_ipv4))
             return true;
     }
     return false;

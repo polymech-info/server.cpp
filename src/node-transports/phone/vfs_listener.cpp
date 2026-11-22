@@ -163,9 +163,11 @@ nlohmann::json peer_json(const pm::lan::Peer& peer)
         {"id", peer.id},
         {"name", peer.name},
         {"trust", pm::lan::trust_name(peer.trust)},
-        {"vfs", pm::lan::vfs_grant_name(peer.outbound.vfs)},
-        {"revision", peer.outbound.revision},
-        {"networks", peer.outbound.networks},
+        {"vfs", pm::lan::vfs_grant_name(peer.allow_peer.vfs)},
+        {"revision", peer.allow_peer.revision},
+        {"vfs_revision", peer.allow_peer.vfs_revision},
+        {"networks", peer.allow_peer.networks},
+        {"allow_peer", pm::lan::allow_peer_json(peer.allow_peer)},
         {"has_token", !peer.token_sha256.empty()},
     };
 }
@@ -317,9 +319,9 @@ bool phone_lan_set_grant(const std::string& profile_dir, const std::string& id, 
     pm::lan::Peer peer;
     if (!pm::lan::PairStore(pair_file(profile_dir)).set_grant(id, grant, networks, peer, err))
         return false;
-    note(false, "[phone-vfs] grant peer=" + peer.id + " vfs=" + pm::lan::vfs_grant_name(peer.outbound.vfs)
-                    + " networks=" + std::to_string(peer.outbound.networks.size())
-                    + " revision=" + std::to_string(peer.outbound.revision));
+    note(false, "[phone-vfs] grant peer=" + peer.id + " vfs=" + pm::lan::vfs_grant_name(peer.allow_peer.vfs)
+                    + " networks=" + std::to_string(peer.allow_peer.networks.size())
+                    + " revision=" + std::to_string(peer.allow_peer.revision));
     json = peer_json(peer).dump();
     return true;
 }
@@ -333,6 +335,55 @@ bool phone_lan_revoke(const std::string& profile_dir, const std::string& id, std
     if (!pm::lan::PairStore(pair_file(profile_dir)).revoke(id, err))
         return false;
     note(false, "[phone-vfs] revoke peer=" + id);
+    return true;
+}
+
+bool phone_lan_forget(const std::string& profile_dir, const std::string& id, std::string& err)
+{
+    if (!profile_ok(profile_dir)) {
+        err = "no profile";
+        return false;
+    }
+    if (!pm::lan::PairStore(pair_file(profile_dir)).forget(id, err))
+        return false;
+    note(false, "[phone-vfs] forget peer=" + id);
+    return true;
+}
+
+bool phone_lan_peer_dial(const std::string& profile_dir, const std::string& id, std::string& json,
+                         std::string& err)
+{
+    json.clear();
+    if (!profile_ok(profile_dir)) {
+        err = "no profile";
+        return false;
+    }
+    pm::lan::Peer peer;
+    if (!pm::lan::PairStore(pair_file(profile_dir)).find(id, peer, err))
+        return false;
+    if (peer.trust != pm::lan::Trust::Paired) {
+        err = "this device is not paired";
+        return false;
+    }
+    // `allow_peer` is what that device may do here. It does not gate how this
+    // phone dials it: a computer remembered from its QR has nothing granted
+    // here and is still the chat, folder, and audio dial.
+    if (peer.urls.empty() || peer.dial_token.empty()) {
+        err = "that device has not shared a folder address";
+        return false;
+    }
+    std::string token;
+    std::string dec_err;
+    if (!pm::android::secure_decrypt(peer.dial_token, token, dec_err) || token.empty()) {
+        err = "could not read the saved key";
+        return false;
+    }
+    json = nlohmann::json{
+        {"url", peer.urls.front()},
+        {"pin", peer.tls_fp},
+        {"token", token},
+        {"name", peer.name},
+    }.dump();
     return true;
 }
 
@@ -371,7 +422,53 @@ bool phone_lan_announce(const std::string& profile_dir, const std::string& id, c
                               local_networks(), rotate, json, err);
 }
 
-std::string phone_lan_open_ticket(const std::string& profile_dir, const std::string& name)
+namespace {
+
+/// Addresses a pairing code may name. Mobile data is not one of them: the
+/// listener does not accept the ticket there. Loopback is not one either.
+std::vector<LocalNetwork> ticket_networks()
+{
+    std::vector<LocalNetwork> out;
+    for (const auto& net : local_networks()) {
+        if (net.kind == "mobile" || net.kind == "local" || net.address.empty())
+            continue;
+        out.push_back(net);
+    }
+    return out;
+}
+
+bool ticket_host(const std::vector<LocalNetwork>& nets, const std::string& requested, std::string& host,
+                 std::string& err)
+{
+    host.clear();
+    if (!requested.empty()) {
+        for (const auto& net : nets) {
+            if (net.address == requested) {
+                host = net.address;
+                return true;
+            }
+        }
+        err = "that network is not up";
+        return false;
+    }
+    for (const auto& net : nets) {
+        if (net.kind == "wifi") {
+            host = net.address;
+            return true;
+        }
+    }
+    if (!nets.empty()) {
+        host = nets.front().address;
+        return true;
+    }
+    err = "this phone is not on a network";
+    return false;
+}
+
+} // namespace
+
+std::string phone_lan_open_ticket(const std::string& profile_dir, const std::string& name,
+                                  const std::string& requested_host)
 {
     const PhoneVfsInfo info = phone_vfs_listen(profile_dir);
     if (!info.listening) {
@@ -380,18 +477,15 @@ std::string phone_lan_open_ticket(const std::string& profile_dir, const std::str
             {"error", info.error.empty() ? "this phone is not listening" : info.error},
         }.dump();
     }
+    const std::vector<LocalNetwork> nets = ticket_networks();
     std::string host;
-    for (const auto& net : local_networks()) {
-        if (net.kind == "mobile" || net.address.empty())
-            continue;
-        if (net.kind == "wifi" || host.empty())
-            host = net.address;
-        if (net.kind == "wifi")
-            break;
+    std::string host_err;
+    if (!ticket_host(nets, requested_host, host, host_err)) {
+        return nlohmann::json{{"ok", false}, {"error", host_err}}.dump();
     }
-    if (host.empty()) {
-        return nlohmann::json{{"ok", false}, {"error", "this phone is not on a network"}}.dump();
-    }
+    nlohmann::json choices = nlohmann::json::array();
+    for (const auto& net : nets)
+        choices.push_back({{"address", net.address}, {"kind", net.kind}});
     std::string uri;
     std::string err;
     if (!g_listener.open_pair_window(name, host, uri, err)) {
@@ -415,6 +509,9 @@ std::string phone_lan_open_ticket(const std::string& profile_dir, const std::str
         {"port", info.port},
         {"fingerprint", info.pin},
         {"role", "phone"},
+        {"host", host},
+        {"networks", choices},
+        {"link", uri},
         {"qr_size", qr_size},
         {"qr", bits},
     }.dump();
