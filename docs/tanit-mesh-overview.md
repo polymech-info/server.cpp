@@ -304,12 +304,12 @@ Both surfaces must expose the same mesh rule: a paired device whose folder acces
 
 ### Current Windows behavior
 
-`FilePanelSourceCatalog.cpp` reads `lan/phone-mounts-cache.json` synchronously. `RefreshPhoneMounts` then starts a detached thread and asks every row from `lan/peers.json` for `/v1/vfs/mounts`.
+`FilePanelSourceCatalog.cpp` reads `lan/phone-mounts-cache.json` synchronously. `RefreshPhoneMounts` then starts a detached thread and asks every dialable peer (`devices.json` first, `peers.json` fallback) for `/v1/vfs/mounts`.
 
 - A successful response replaces that device's cached mounts.
 - An unreachable device keeps the cached mounts and adds `offline`.
 - A refusal removes that device's cached mounts.
-- The new cache is visible the next time Places is built. No refresh message updates the open view.
+- An open Places view rebuilds via `WM_FILEPANEL_PLACES_READY`. A dial-book watch on `lan/devices.json` / `lan/peers.json` re-runs the refresh after announce so the tray does not need a restart.
 - Every phone folder uses `section = "Devices"`.
 - The label adds the device name only when more than one phone exists.
 - `Pair a phone` is a fake Shell location (`tanit:node-pair`) in the same section.
@@ -397,7 +397,7 @@ Rows 1–6 in `tanit-mesh.md` §11 are done. These are the gaps this map still s
 | 18 | One global grant revision | done | Per-capability revisions. VFS live guard watches `vfs_revision` |
 | 19 | Audio/video/chat/tools combine distinct operations | partial | `audio.playback`, `video.control`, `chat.realtime`, `speech.stt`, `speech.tts`, `host.open` are registered ids (`capability_reserved`). They round-trip like unknown ids and `grant_authorize` answers `Unsupported` for them whatever level the file says. They stay off until a route registers them and `Grant` models them. Routes still gate on the combined `RouteGrant` (`/v1/audio` for both capture and playback, `/v1/video/control` as `video`) |
 | 20 | VFS permission is peer-wide | done | `vfs.resources` (`mount:photos`, `photos`, `docs*`, `*`) narrows mounts. `LlmVfsAccess::mount_allowed` is set on the phone listener and the desktop peer gate when the list is non-empty. A refused mount is absent from `/v1/vfs/mounts` and answers 404 on list, stat, read, write, mkdir, delete, move, and resolve. Empty or missing means every published mount |
-| 21 | Permission requests as remote policy edits | partial | `authorize_peer` is the testable core (default Deny → `EASK`; AllowOnce / Persist*). Desktop `Service::prepare` installs `ensure_win32_mesh_consent_prompt` → ConsentDlg with mesh copy in en/de/es/fr/it/ar/zh (`ConsentDlg_i18n::mesh_strings_for`, follows `appearance.display_language`). Headless stays Deny. Open: Android Compose; async/non-blocking prompt |
+| 21 | Permission requests as remote policy edits | partial | `authorize_peer` is the testable core (default Deny → `EASK`; AllowOnce / Persist*). Desktop `Service::prepare` installs `ensure_win32_mesh_consent_prompt` → ConsentDlg with mesh copy in en/de/es/fr/it/ar/zh (`ConsentDlg_i18n::mesh_strings_for`, follows `appearance.display_language`). Android: `MeshConsentHost` + `assets/i18n/mesh.json` (VoiceCopy langs) + `jni_pm_mesh_consent.cpp` installs the same prompt; AlertDialog on resumed Activity. Headless stays Deny. Open: async/non-blocking prompt |
 | 22 | Route policy uses a flat scope list | partial | `grant_authorize(grant, capability, operation, resource)` is the semantic query. The phone listener's vfs gate, write flag, live guard, and `/v1/lan/phone-vfs`, and the desktop peer's `write` and mount list use it. `grant_scopes` is now a projection of it and stays for `RouteGrant` and the API. Open: express `RouteGrant` as capability and operation per route |
 
 E2EE stays after this list. `encryption.cpp` stays unlinked until a file must sit where the peer is not serving it.
