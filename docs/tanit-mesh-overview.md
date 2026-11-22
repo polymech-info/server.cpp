@@ -252,31 +252,31 @@ Desktop → phone folder browse is gated by the **phone** row. Phone → desktop
 sequenceDiagram
     autonumber
     actor User
-    participant Desk as Desktop<br/>Settings / Places
-    participant Node as Desktop node<br/>lan_win Service
+    participant Desk as Desktop Settings Places
+    participant Node as Desktop node
     participant Phone as Phone app
-    participant PL as Phone listener<br/>PeerListener
+    participant PL as Phone listener
 
-    User->>Desk: Pair phone (QR / paste link)
-    Desk->>Node: open_pairing → PairingTicket
-    Node-->>Desk: QR (pin + tp1_ secret)
-    User->>Phone: Scan / open tanit://pair…
-    Phone->>Node: POST /v1/lan/pair (secret + pin check)
-    Node-->>Phone: tn1_ token + desktop id
-    Note over Node,Phone: Both sides store a Peer row.<br/>allow_peer starts all off.
+    User->>Desk: Pair phone QR or paste link
+    Desk->>Node: open_pairing PairingTicket
+    Node-->>Desk: QR with pin and tp1_ secret
+    User->>Phone: Scan or open pair link
+    Phone->>Node: POST /v1/lan/pair secret and pin check
+    Node-->>Phone: tn1_ token and desktop id
+    Note over Node,Phone: Both sides store a Peer row - allow_peer starts all off
 
-    User->>Desk: Devices → Folder access Read/Write<br/>(desktop resources for the phone)
-    User->>Phone: Paired devices → vfs + networks<br/>(phone resources for the desktop)
-    User->>Phone: Shared folders → publish mounts
-    Phone->>PL: start / listen
-    Phone->>Node: POST /v1/lan/phone-vfs<br/>(urls, tls_fp, dial_token)
+    User->>Desk: Devices folder access Read or Write
+    User->>Phone: Paired devices vfs and networks
+    User->>Phone: Shared folders publish mounts
+    Phone->>PL: start listen
+    Phone->>Node: POST /v1/lan/phone-vfs urls tls_fp dial_token
     Node-->>Desk: dial book updated
 
-    User->>Desk: Places → open vfs://phone-…/mount
-    Desk->>PL: GET /v1/vfs/list|read|… (pinned TLS + bearer)
-    PL-->>Desk: entries + can[]
+    User->>Desk: Places open phone mount URI
+    Desk->>PL: GET /v1/vfs list or read pinned TLS plus bearer
+    PL-->>Desk: entries and can list
     opt write grant
-        Desk->>PL: POST mkdir / move / delete<br/>PUT write
+        Desk->>PL: POST mkdir move delete or PUT write
     end
 ```
 
@@ -288,31 +288,31 @@ Computer QR is the common desktop↔phone path. The ticket only authorizes the c
 sequenceDiagram
     autonumber
     actor User
-    participant UI as Desktop UI<br/>tray / Settings
-    participant Svc as lan_win::Service
-    participant StoreD as Desktop PairStore<br/>devices.json
-    participant App as Phone<br/>LanPair / PairingCode
-    participant StoreP as Phone PairStore<br/>devices.json
+    participant UI as Desktop UI
+    participant Svc as lan_win Service
+    participant StoreD as Desktop PairStore
+    participant App as Phone LanPair
+    participant StoreP as Phone PairStore
     participant Remember as nativeLanRememberPeer
 
     User->>UI: Show pair code
-    UI->>Svc: open_pairing(scopes ignored for grant)
-    Svc->>Svc: mint PairingTicket (tp1_, TTL, pin)
-    Svc-->>UI: QR / tanit://pair… (TLS pin + secret)
+    UI->>Svc: open_pairing
+    Svc->>Svc: mint PairingTicket tp1_ TTL pin
+    Svc-->>UI: QR tanit pair link
 
     User->>App: Scan or paste
     App->>App: verify advertised pin before POST
-    App->>Svc: POST /v1/lan/pair {secret, device id/name}
-    alt bad secret / lockout
-        Svc-->>App: 401 / locked
+    App->>Svc: POST /v1/lan/pair secret and device id
+    alt bad secret or lockout
+        Svc-->>App: 401 or locked
     else ok
-        Svc->>StoreD: ensure_peer + token_sha256(tn1_)<br/>allow_peer all off, revision 1
-        Svc-->>App: {token tn1_, host id, urls…}
-        App->>Remember: write peer row (urls, pin, wrapped dial_token)
-        App->>StoreP: Peer for desktop (trust=paired, grants off)
-        App->>App: also save lan-agent profile<br/>(api_key = tn1_, pair_id = host)
-        Note over StoreD,StoreP: Pairing grants nothing.<br/>Token identifies; Grant authorizes.
+        Svc->>StoreD: ensure_peer token_sha256 allow_peer all off
+        Svc-->>App: tn1_ token host id urls
+        App->>Remember: write peer row urls pin dial_token
+        App->>StoreP: Peer for desktop trust paired grants off
+        App->>App: save lan-agent profile api_key tn1_
     end
+    Note over StoreD,StoreP: Pairing grants nothing - token identifies - Grant authorizes
 ```
 
 Classes: `Service::open_pairing` / `reveal_qr` (`lan_win.cpp`), `PairStore::ensure_peer` / `authorize`, `LanPair.kt`, `jni` `nativeLanRememberPeer`, phone `PairStore` via settings JNI.
@@ -325,29 +325,29 @@ Two independent edits. The desktop grants what the phone may use on the PC. The 
 sequenceDiagram
     autonumber
     actor User
-    participant DevUI as Desktop Settings<br/>PairedDevicesCard
+    participant DevUI as Desktop Settings
     participant Rpc as settingsDevicesGrant
     participant StoreD as Desktop PairStore
-    participant PhoneUI as Phone<br/>PhoneSharedFolders
+    participant PhoneUI as Phone SharedFolders
     participant StoreP as Phone PairStore
-    participant PV as PhoneVfsService / PhoneVfs.kt
+    participant PV as PhoneVfsService
     participant PL as PeerListener
-    participant Node as Desktop<br/>POST /v1/lan/phone-vfs
+    participant Node as Desktop phone-vfs route
 
-    User->>DevUI: Folder access Off/Read/Write<br/>Audio/Video/Chat/Tools Off/Ask/On
+    User->>DevUI: Folder access and cap switches
     DevUI->>Rpc: settingsDevicesGrant
-    Rpc->>StoreD: set_caps / vfs level + revisions
-    Note over StoreD: Gates phone→desktop /v1/vfs and /v1/audio…
+    Rpc->>StoreD: set_caps vfs level and revisions
+    Note over StoreD: Gates phone to desktop vfs and audio
 
-    User->>PhoneUI: Paired device → vfs + networks
-    PhoneUI->>StoreP: nativeLanSetGrant (vfs, networks)
+    User->>PhoneUI: Paired device vfs and networks
+    PhoneUI->>StoreP: nativeLanSetGrant
     User->>PhoneUI: Share at least one folder
-    PhoneUI->>PV: sync / hold
-    PV->>PL: phone_vfs_listen (TLS + /v1/vfs/*)
-    PV->>Node: POST /v1/lan/phone-vfs<br/>Authorization: Bearer tn1_
-    Node->>Node: require_v1_auth (pair token)<br/>store urls, tls_fp, wrapped dial_token<br/>on devices.json (+ peers.json dial book)
-    Node-->>PV: 200 {token: held|missing}
-    Note over StoreD: Dial-book watch → RefreshPhoneMounts.
+    PhoneUI->>PV: sync or hold
+    PV->>PL: phone_vfs_listen TLS and vfs routes
+    PV->>Node: POST /v1/lan/phone-vfs Bearer tn1_
+    Node->>Node: require_v1_auth store urls tls_fp dial_token
+    Node-->>PV: 200 token held or missing
+    Note over StoreD: Dial-book watch runs RefreshPhoneMounts
 ```
 
 Announce is dial material only. The desktop accepts it from a paired token; it does not raise grants. The phone still refuses `/v1/vfs/*` until **its** `allow_peer.vfs` for this computer is read or write (and the client arrives on an allowed network).
@@ -359,39 +359,39 @@ sequenceDiagram
     autonumber
     actor User
     participant Places as FilePanelSourceCatalog
-    participant Peers as phone_peers.hpp
-    participant Client as phone_client / vfs::Client
+    participant Peers as phone_peers
+    participant Client as phone_client
     participant PL as Phone listener
-    participant Gate as grant_authorize<br/>authorize_peer
+    participant Gate as grant_authorize
     participant Store as Phone PairStore
-    participant Vfs as register_llm_vfs_routes<br/>pm::vfs::Store
+    participant Vfs as vfs Store
 
-    User->>Places: Open Places / refresh
-    Places->>Peers: peers() (devices.json, peers.json fallback)
-    Places->>Client: GET /v1/vfs/mounts (per phone)
-    Client->>Client: route_for: /health with pin<br/>then bearer GET
+    User->>Places: Open Places or refresh
+    Places->>Peers: peers from devices.json
+    Places->>Client: GET /v1/vfs/mounts per phone
+    Client->>Client: route_for health with pin then bearer GET
     Client->>PL: GET /v1/vfs/mounts
-    PL->>Gate: vfs / list (or read)
-    Gate->>Store: allow_peer.vfs level + networks + resources
-    alt off / wrong network / ask→Deny
-        PL-->>Client: 403 EGRANT / ENETWORK (+ vfs_revision)
-        Client->>Peers: note_grant (cache hint)
+    PL->>Gate: vfs list or read
+    Gate->>Store: allow_peer vfs level networks resources
+    alt refused
+        PL-->>Client: 403 EGRANT or ENETWORK
+        Client->>Peers: note_grant cache hint
     else allowed
         PL->>Vfs: visible mounts
-        PL-->>Client: mounts[] + can[]
-        Places-->>User: device section + mount rows<br/>vfs://phone-id/mount
+        PL-->>Client: mounts and can list
+        Places-->>User: device section and mount rows
     end
 
     User->>Places: Open mount
-    Places->>Client: list / read / mkdir / …
-    Client->>PL: /v1/vfs/list|stat|read|write|mkdir|move|delete
-    PL->>Gate: capability + operation
-    opt level=ask
-        Gate->>Gate: ConsentDlg / MeshConsentHost
-        Gate->>Gate: mesh consent ticket (AllowOnce)<br/>or persist* into PairStore
+    Places->>Client: list read mkdir or write
+    Client->>PL: /v1/vfs operation
+    PL->>Gate: capability and operation
+    opt level ask
+        Gate->>Gate: ConsentDlg or MeshConsentHost
+        Gate->>Gate: consent ticket or persist into PairStore
     end
-    PL->>Vfs: jail + op
-    PL-->>Client: JSON / bytes + can
+    PL->>Vfs: jail and op
+    PL-->>Client: JSON or bytes and can
 ```
 
 UI ops from the file panel: `fsmkdir` / `fstouch` / `fsrename` → `ops::ensure_dir` / `create_empty_file` / `rename_uri`; delete → `RemoteVfsFolderModel::DeleteUris` → `ops::remove_uri` → `phone::remove`.
@@ -401,31 +401,31 @@ UI ops from the file panel: `fsmkdir` / `fstouch` / `fsrename` → `ops::ensure_
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Caller as Peer (phone or desktop)
-    participant Route as HTTP route<br/>/v1/audio|vfs|…
-    participant Auth as Service::authorize<br/>or listener guard
+    participant Caller as Peer
+    participant Route as HTTP route
+    participant Auth as Service authorize
     participant AP as authorize_peer
     participant GA as grant_authorize
-    participant Prompt as ConsentDlg<br/>or MeshConsentHost
+    participant Prompt as ConsentDlg
     participant Store as PairStore
 
-    Caller->>Route: request + Bearer tn1_
-    Route->>Auth: need_scope = capability
+    Caller->>Route: request Bearer tn1_
+    Route->>Auth: need_scope capability
     Auth->>Store: find peer by token hash
-    Auth->>AP: (store, peer, cap, op, resource)
+    Auth->>AP: store peer cap op resource
     AP->>GA: allow_peer
     alt Allow
         GA-->>Auth: Allow
-    else Deny (off)
-        GA-->>Auth: Deny → 403
+    else Deny
+        GA-->>Auth: Deny 403
     else Ask
-        AP->>AP: mesh_consent_ticket_allows?
+        AP->>AP: mesh_consent_ticket_allows
         alt ticket hit
             AP-->>Auth: Allow
-        else
+        else prompt
             AP->>Prompt: MeshConsentRequest
-            Prompt-->>AP: Deny | AllowOnce | Persist*
-            opt Persist*
+            Prompt-->>AP: Deny or AllowOnce or Persist
+            opt Persist
                 AP->>Store: apply_mesh_consent_persist
             end
             opt AllowOnce
@@ -433,8 +433,8 @@ sequenceDiagram
             end
         end
     end
-    Auth-->>Route: scopes / LlmVfsAccess
-    Route-->>Caller: 200 or 403 EASK/EGRANT
+    Auth-->>Route: scopes or LlmVfsAccess
+    Route-->>Caller: 200 or 403 EASK or EGRANT
 ```
 
 Default without a UI prompt is Deny (headless / CLI). Desktop Settings Devices exposes Off / Ask / On for audio, video, chat, and tools; folder access is Off / Read / Write (ask for vfs is via `authorize_peer` when level is ask).
