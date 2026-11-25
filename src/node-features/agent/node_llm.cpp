@@ -246,6 +246,12 @@ TurnOutcome run_one_completion(const AgentServerOptions& opt,
         }
     }
     if (body.contains("tanit") && body["tanit"].is_object()
+        && body["tanit"].contains("user_location")
+        && body["tanit"]["user_location"].is_string()) {
+        turn.user_location = media::llm::agent::normalize_user_location(
+            body["tanit"]["user_location"].get<std::string>());
+    }
+    if (body.contains("tanit") && body["tanit"].is_object()
         && body["tanit"].contains("tool_providers")
         && body["tanit"]["tool_providers"].is_array()) {
         for (const auto& v : body["tanit"]["tool_providers"]) {
