@@ -130,6 +130,7 @@ bool desktop_authorize_vfs(const pm::server::ListenOptions& options, const httpl
             return false;
         }
         access.full = true;
+        access.all_mounts = true;
         return true;
     }
     if (g_lan) {
@@ -150,6 +151,7 @@ bool desktop_authorize_vfs(const pm::server::ListenOptions& options, const httpl
             logger::info(std::string("[peer] vfs ") + dev.id);
             access.write = dev.write;
             access.mount_allowed = dev.mount_allowed;
+            access.all_mounts = !static_cast<bool>(dev.mount_allowed);
             access.grant_revision = dev.revision;
             access.still_granted = [id = dev.id, revision = dev.revision]() {
                 if (!g_lan)

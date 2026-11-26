@@ -19,16 +19,19 @@ struct LlmVfsAccess {
     bool        files = false;
     /// Mutating routes. `files` is list, stat, and read.
     bool        write = false;
+    /// Explicit permission to see every published mount. Do not infer this from
+    /// an absent `mount_allowed` callback.
+    bool        all_mounts = false;
     std::string device_id;
-    /// Revision of the grant that produced this access. Zero when the caller
-    /// has no pair row. A 403 for a write reports it.
+    /// VFS capability revision that produced this access. Zero when the caller
+    /// has no pair row. Refusal bodies report it as `vfs_revision`.
     int         grant_revision = 0;
-    /// Re-read while a write is spilling. Empty means the caller has no pair
-    /// row to go stale. False means stop and delete the partial file.
+    /// Re-check during long transfers and mutations. Empty means no live check.
+    /// False means stop (and discard a partial write).
     std::function<bool()> still_granted;
     /// Narrows the published mounts for this caller (the `vfs` capability's
-    /// `resources`). Empty means every mount. A mount it refuses is absent from
-    /// `/v1/vfs/mounts` and answers 404 everywhere else.
+    /// `resources`). Used with `all_mounts == false`. A refused mount is absent
+    /// from `/v1/vfs/mounts` and answers 404 everywhere else.
     std::function<bool(std::string_view mount)> mount_allowed;
 };
 

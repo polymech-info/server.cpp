@@ -2279,8 +2279,12 @@ bool revoke_paired_device(const std::string& id, std::string& err)
 bool set_paired_device_grant(const std::string& id, const std::string& vfs, bool audio, bool video,
                              bool chat, bool tools, std::string& err)
 {
-    return set_paired_device_grant(id, vfs, audio ? "on" : "off", video ? "on" : "off",
-                                   chat ? "on" : "off", tools ? "on" : "off", err);
+    // Must be std::string: a const char* prefers the bool overload (pointer→bool
+    // outranks user-defined conversion to std::string) and recurses forever.
+    return set_paired_device_grant(id, vfs, std::string(audio ? "on" : "off"),
+                                   std::string(video ? "on" : "off"),
+                                   std::string(chat ? "on" : "off"),
+                                   std::string(tools ? "on" : "off"), err);
 }
 
 bool set_paired_device_grant(const std::string& id, const std::string& vfs, const std::string& audio,

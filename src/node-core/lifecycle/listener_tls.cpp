@@ -262,8 +262,27 @@ void serve_one(mbedtls_ssl_context& ssl, mbedtls_net_context& backend, const std
         return;
     head.insert(line + 2, "X-Tanit-Arrived: " + arrived + "\r\nConnection: close\r\n");
     head += "\r\n";
+    constexpr std::size_t k_payload_max = 9u * 1024u * 1024u;
     const std::size_t need = content_length(head);
-    while (body.size() < need && body.size() < 9u * 1024u * 1024u) {
+    if (need > k_payload_max) {
+        const std::string payload =
+            "{\"ok\":false,\"code\":\"EBODY\",\"error\":\"The request body is too large.\"}";
+        const std::string reply =
+            "HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\nContent-Type: application/json\r\n"
+            "Content-Length: " + std::to_string(payload.size()) + "\r\n\r\n" + payload;
+        size_t sent = 0;
+        while (sent < reply.size()) {
+            const int n = mbedtls_ssl_write(&ssl, reinterpret_cast<const unsigned char*>(reply.data() + sent),
+                                            reply.size() - sent);
+            if (n == MBEDTLS_ERR_SSL_WANT_WRITE)
+                continue;
+            if (n <= 0)
+                return;
+            sent += static_cast<size_t>(n);
+        }
+        return;
+    }
+    while (body.size() < need && body.size() < k_payload_max) {
         const int n = mbedtls_ssl_read(&ssl, buf, sizeof buf);
         if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE)
             continue;

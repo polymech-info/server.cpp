@@ -401,13 +401,22 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
     const auto shared = std::make_shared<const Shared>(std::move(host));
 
     auto server = std::make_shared<httplib::Server>();
-    server->set_payload_max_length(9u * 1024u * 1024u);
+    constexpr std::size_t k_payload_max = 9u * 1024u * 1024u;
+    server->set_payload_max_length(k_payload_max);
     server->new_task_queue = [] { return new httplib::ThreadPool(4); };
 
     // Step 1. A network nobody was granted learns nothing, not even the name.
+    // Reject oversized Content-Length before the body is buffered.
     server->set_pre_routing_handler([shared](const httplib::Request& req, httplib::Response& res) {
         if (shared->host.enter)
             shared->host.enter();
+        if (req.has_header("Content-Length")) {
+            const auto len = req.get_header_value_u64("Content-Length");
+            if (len > 9u * 1024u * 1024u) {
+                send(res, 413, refusal("EBODY", "The request body is too large."));
+                return httplib::Server::HandlerResponse::Handled;
+            }
+        }
         if (req.method == "POST" && req.path == "/v1/lan/pair")
             return httplib::Server::HandlerResponse::Unhandled;
         if (!shared->store.any_peer_on(arrived_on(req))) {
@@ -667,6 +676,8 @@ bool PeerListener::start(PeerListenerHost host, std::string& err)
                 return pm::lan::grant_resource_allowed(grant, pm::lan::k_cap_vfs,
                                                        "mount:" + std::string(mount));
             };
+        } else {
+            access.all_mounts = true;
         }
         // The stream guard watches the vfs capability only. An audio or chat
         // edit does not end a folder operation. An AllowOnce ticket keeps a
