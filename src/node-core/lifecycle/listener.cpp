@@ -104,6 +104,7 @@ struct Shared {
             note(true, where(req) + " deny network peer=" + peer.id);
             nlohmann::json body = refusal("ENETWORK", "This network is not granted to this device.");
             body["revision"] = peer.allow_peer.revision;
+            body["vfs_revision"] = peer.allow_peer.vfs_revision;
             body["vfs"] = pm::lan::vfs_grant_name(peer.allow_peer.vfs);
             send(res, 403, body);
             return false;

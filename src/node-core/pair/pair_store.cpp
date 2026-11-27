@@ -1102,8 +1102,12 @@ bool PairStore::set_grant(std::string_view id, VfsGrant vfs, const std::vector<s
 bool PairStore::set_caps(std::string_view id, VfsGrant vfs, bool audio, bool video, bool chat,
                          bool tools, Peer& out, std::string& err) const
 {
-    return set_caps(id, vfs, audio ? "on" : "off", video ? "on" : "off", chat ? "on" : "off",
-                    tools ? "on" : "off", out, err);
+    // Explicit string_view: bare "on"/"off" would prefer the bool overload
+    // (const char* → bool beats const char* → string_view) and recurse forever.
+    const std::string_view on{"on"};
+    const std::string_view off{"off"};
+    return set_caps(id, vfs, audio ? on : off, video ? on : off, chat ? on : off,
+                    tools ? on : off, out, err);
 }
 
 bool PairStore::set_caps(std::string_view id, VfsGrant vfs, std::string_view audio,

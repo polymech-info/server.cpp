@@ -722,16 +722,23 @@ struct GrantResult {
     GrantResult out;
     long http = 0;
     std::string body;
-    if (!detail::get_path(device, "/v1/lan/grant", http, body, out.err))
+    if (!detail::get_path(device, "/v1/lan/grant", http, body, out.err)) {
+        logger::info(std::string("[phone-vfs] grant failed ") + std::string(device) + " err="
+                     + (out.err.empty() ? "unreachable" : out.err));
         return out;
+    }
     if (http < 200 || http >= 300) {
         out.err = detail::refusal_text(std::string(device), body, http);
+        logger::info(std::string("[phone-vfs] grant refused ") + std::string(device)
+                     + " http=" + std::to_string(http) + " err=" + out.err);
         return out;
     }
     try {
         const nlohmann::json json = nlohmann::json::parse(body, nullptr, false);
         if (!json.is_object() || !json.contains("grant") || !json["grant"].is_object()) {
             out.err = "The phone sent no grant.";
+            logger::info(std::string("[phone-vfs] grant failed ") + std::string(device)
+                         + " err=" + out.err);
             return out;
         }
         const auto& g = json["grant"];
@@ -746,8 +753,12 @@ struct GrantResult {
             out.vfs = "off";
         detail::note_grant(device, out.revision, out.vfs);
         out.ok = true;
+        logger::info(std::string("[phone-vfs] grant ") + std::string(device) + " vfs=" + out.vfs
+                     + " rev=" + std::to_string(out.revision));
     } catch (const std::exception& ex) {
         out.err = ex.what();
+        logger::info(std::string("[phone-vfs] grant failed ") + std::string(device) + " err="
+                     + out.err);
     }
     return out;
 }
@@ -757,10 +768,15 @@ struct GrantResult {
     MountsResult out;
     long http = 0;
     std::string body;
-    if (!detail::get_path(device, "/v1/vfs/mounts", http, body, out.err, &out.refused))
+    if (!detail::get_path(device, "/v1/vfs/mounts", http, body, out.err, &out.refused)) {
+        logger::info(std::string("[phone-vfs] mounts failed ") + std::string(device) + " err="
+                     + (out.err.empty() ? "unreachable" : out.err));
         return out;
+    }
     if (http < 200 || http >= 300) {
         out.err = detail::refusal_text(std::string(device), body, http);
+        logger::info(std::string("[phone-vfs] mounts refused ") + std::string(device)
+                     + " http=" + std::to_string(http) + " err=" + out.err);
         return out;
     }
     try {
@@ -786,6 +802,8 @@ struct GrantResult {
             out.mounts.push_back(std::move(mount));
         }
         out.ok = true;
+        logger::info(std::string("[phone-vfs] mounts ") + std::string(device) + " n="
+                     + std::to_string(out.mounts.size()));
     } catch (const std::exception& ex) {
         out.err = ex.what();
     }
@@ -806,10 +824,17 @@ struct GrantResult {
     path = detail::append_query_param(path, "path", rel);
     long http = 0;
     std::string body;
-    if (!detail::get_path(device, path, http, body, out.err))
+    if (!detail::get_path(device, path, http, body, out.err)) {
+        logger::info(std::string("[phone-vfs] list failed ") + std::string(device) + "/"
+                     + std::string(browse_path) + " err="
+                     + (out.err.empty() ? "unreachable" : out.err));
         return out;
+    }
     if (http < 200 || http >= 300) {
         out.err = detail::refusal_text(std::string(device), body, http);
+        logger::info(std::string("[phone-vfs] list refused ") + std::string(device) + "/"
+                     + std::string(browse_path) + " http=" + std::to_string(http)
+                     + " err=" + out.err);
         return out;
     }
     try {
@@ -839,6 +864,8 @@ struct GrantResult {
             out.entries.push_back(std::move(entry));
         }
         out.ok = true;
+        logger::info(std::string("[phone-vfs] list ") + std::string(device) + "/"
+                     + std::string(browse_path) + " entries=" + std::to_string(out.entries.size()));
     } catch (const std::exception& ex) {
         out.err = ex.what();
     }
@@ -935,7 +962,7 @@ struct GrantResult {
     if (options.expected_size)
         file_opts.expected_size = *options.expected_size;
     file_opts.on_progress = std::move(options.on_progress);
-    logger::debug(std::string("[phone-vfs] GET-FILE ") + req.url);
+    logger::info(std::string("[phone-vfs] GET-FILE ") + req.url);
     const auto resp = pm::commons::net::request_to_file(req, dest, std::move(file_opts));
     const long http = resp.status;
     const bool transport_ok = resp.ok;
@@ -955,6 +982,8 @@ struct GrantResult {
         } else {
             out.err = resp.error.empty() ? "phone read failed" : resp.error;
         }
+        logger::info(std::string("[phone-vfs] GET-FILE failed http=") + std::to_string(http)
+                     + " err=" + out.err);
         return out;
     }
     out.ok = true;
@@ -962,6 +991,8 @@ struct GrantResult {
     out.bytes = std::filesystem::file_size(dest, size_ec);
     if (size_ec)
         out.bytes = file_opts.expected_size;
+    logger::info(std::string("[phone-vfs] GET-FILE ok http=") + std::to_string(http)
+                 + " bytes=" + std::to_string(out.bytes));
     return out;
 }
 
