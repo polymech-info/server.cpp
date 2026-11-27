@@ -7,7 +7,8 @@
 #include "string/string_utils.hpp"
 #include "core/settings_runtime.hpp"
 #include "lan/pair_store.hpp"
-#include "vfs/phone_peers.hpp"
+#include "pm/node/peer_book.hpp"
+#include "pm/node/peer_book_defaults.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -18,6 +19,7 @@ namespace node_detail {
 void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
                          const pm::server::ServerFeatures& features)
 {
+    pm::node::install_desktop_peer_book_defaults();
     auto lan_off = [](httplib::Response& res) {
         res.status = 404;
         res.set_content(route_error("LAN discovery is off; restart with --lan").dump(),
@@ -277,14 +279,14 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
             return;
         }
         const std::string authority = body.value("authority", std::string{});
-        if (!pm::vfs::phone::is_device_mount(authority)) {
+        if (!pm::node::is_device_mount(authority)) {
             refuse(400, "the phone name is not valid");
             return;
         }
         std::vector<std::string> urls;
         if (body.contains("urls") && body["urls"].is_array()) {
             for (const auto& url : body["urls"]) {
-                if (!url.is_string() || urls.size() >= pm::vfs::phone::k_max_urls) {
+                if (!url.is_string() || urls.size() >= pm::node::k_max_urls) {
                     refuse(400, "a phone address is not usable");
                     return;
                 }
@@ -318,7 +320,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
         }
         // One paired device cannot take over the row of another phone. The row
         // is free again when the device that announced it is no longer paired.
-        if (const auto known = pm::vfs::phone::find_peer(authority);
+        if (const auto known = pm::node::find_peer(authority);
             known && !known->pair.empty() && known->pair != owner && owner != "serve-key") {
             bool still_paired = known->pair == "serve-key";
             for (const auto& d : g_lan->devices()) {
@@ -335,7 +337,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
         std::string err;
         if (!urls.empty()) {
             std::string sealed;
-            if (!token.empty() && !pm::vfs::phone::seal_dial_token(token, sealed, err)) {
+            if (!token.empty() && !pm::node::seal_dial_token(token, sealed, err)) {
                 refuse(400, err.empty() ? "the phone token is not valid" : err);
                 return;
             }
@@ -361,7 +363,7 @@ void register_lan_routes(httplib::Server& svr, const AuthFn& require_v1_auth,
                 }
             }
         }
-        if (!pm::vfs::phone::store_peer(authority, name, urls, token, tls_fp, owner, holds_token, err)) {
+        if (!pm::node::store_peer(authority, name, urls, token, tls_fp, owner, holds_token, err)) {
             const bool bad_input = err.find("not valid") != std::string::npos
                                    || err.find("not usable") != std::string::npos;
             refuse(bad_input ? 400 : 500, err.empty() ? "could not store the phone" : err);

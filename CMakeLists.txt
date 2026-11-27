@@ -59,6 +59,7 @@ endif()
 pm_server_portable_sources(_pm_server_portable_sources)
 add_library(pm-server-lib STATIC ${_pm_server_portable_sources})
 target_include_directories(pm-server-lib PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/base/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/tanit-node/include")
 if(picosha2_SOURCE_DIR)
@@ -72,6 +73,9 @@ target_link_libraries(pm-server-lib PUBLIC
   httplib::httplib)
 if(TARGET logger)
   target_link_libraries(pm-server-lib PUBLIC logger)
+endif()
+if(TARGET pm-commons-net)
+  target_link_libraries(pm-server-lib PUBLIC pm-commons-net)
 endif()
 if(TARGET mbedtls)
   target_compile_definitions(pm-server-lib PRIVATE PM_PHONE_TLS)

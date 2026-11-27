@@ -2,7 +2,16 @@
 
 Tanit node. `pm-server-lib` is the `/v1/vfs` routes and the paired-peer listener. Desktop routes, mDNS, and the LAN proxy stay in this tree and are compiled by the host. The phone compiles the portable files plus its lifecycle and transport glue.
 
-Siblings: [commons.cpp](../commons.cpp/README.md) (paths, strings, logging), [vfs.cpp](../vfs.cpp/README.md) (the jail), [llm.cpp](../llm.cpp/README.md) (agent routes on the desktop listener). [encryption.cpp](../encryption.cpp/README.md) is not linked. Its `pm::host::Device` and `pm-encryption server` are a test host, not this process.
+Package triangle (settled): **server** owns complete node connectivity —
+PeerBook, dial, grants, `/v1/vfs` client **and** routes — and registers a
+VFS backend into [vfs.cpp](../vfs.cpp/README.md). It does not own the transfer
+engine. Plan: [docs/vfs-refactor.md](../../docs/vfs-refactor.md).
+
+Siblings: [commons.cpp](../commons.cpp/README.md) (primitives, optional
+`pm-commons-net`), [vfs.cpp](../vfs.cpp/README.md) (jail + upcoming client
+runtime), [llm.cpp](../llm.cpp/README.md) (agent routes on the desktop
+listener). [encryption.cpp](../encryption.cpp/README.md) is not linked. Its
+`pm::host::Device` and `pm-encryption server` are a test host, not this process.
 
 ## Modules
 

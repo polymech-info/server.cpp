@@ -9,6 +9,7 @@ endfunction()
 function(pm_server_portable_sources out_var)
   _pm_server_root(_root)
   set(${out_var}
+    "${_root}/src/node-client/peer_book.cpp"
     "${_root}/src/node-features/vfs/vfs.cpp"
     "${_root}/src/node-core/lifecycle/listener.cpp"
     "${_root}/src/node-core/lifecycle/listener_tls.cpp"
@@ -81,6 +82,18 @@ function(pm_server_desktop_core_sources out_var)
     "${_root}/src/node-core/lifecycle/desktop.cpp"
     "${_root}/src/node-features/agent/node_lan.cpp"
     PARENT_SCOPE)
+endfunction()
+
+function(pm_server_add_stream_proxy target)
+  if(NOT TARGET ${target})
+    return()
+  endif()
+  get_target_property(_srcs ${target} SOURCES)
+  if(_srcs MATCHES "stream_proxy\\.cpp")
+    return()
+  endif()
+  _pm_server_root(_root)
+  target_sources(${target} PRIVATE "${_root}/src/node-features/vfs/stream_proxy.cpp")
 endfunction()
 
 function(pm_server_phone_sources out_var)

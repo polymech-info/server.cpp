@@ -39,8 +39,9 @@
 #include "lan/mesh_consent.hpp"
 #include "lan/mesh_consent_ui_win.hpp"
 #include "lan/pair_store.hpp"
-#include "vfs/phone_peers.hpp"
-#include "vfs/peer_dial.hpp"
+#include "pm/node/peer_book.hpp"
+#include "pm/node/peer_book_defaults.hpp"
+#include "pm/node/peer_dial.hpp"
 #include "pm/node/sessions.hpp"
 #include "lan/tanit_lan.hpp"
 #include "lan/tanit_lan_qr.hpp"
@@ -2272,7 +2273,8 @@ bool revoke_paired_device(const std::string& id, std::string& err)
         return false;
     }
     logger::info("lan pair: revoked " + id);
-    pm::vfs::phone::forget_revoked_device(id);
+    pm::node::install_desktop_peer_book_defaults();
+    pm::node::forget_revoked_device(id);
     return true;
 }
 
